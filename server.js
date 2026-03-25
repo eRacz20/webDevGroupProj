@@ -26,8 +26,14 @@ function isValidCoord(x, y, size) {
   return x >= 0 && y >= 0 && x < size && y < size;
 }
 
+// 🔥 FIXED PLAYER ID PARSER
 function getPlayerId(body) {
-  return body.playerId ?? body.player_id ?? null;
+  if (!body) return null;
+
+  if (body.playerId !== undefined) return Number(body.playerId);
+  if (body.player_id !== undefined) return Number(body.player_id);
+
+  return null;
 }
 
 // ----------------------
@@ -77,10 +83,14 @@ app.get("/api/players/:id/stats", (req, res) => {
 // CREATE GAME
 // ----------------------
 app.post("/api/games", (req, res) => {
+  console.log("BODY:", req.body);
+
   const playerId = getPlayerId(req.body);
   const grid_size = req.body.grid_size ?? 10;
 
-  if (!playerId) {
+  console.log("PLAYER ID:", playerId);
+
+  if (playerId === null) {
     return res.status(400).json({ error: "player_id required" });
   }
 
@@ -115,7 +125,8 @@ app.post("/api/games/:id/join", (req, res) => {
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
-  if (!playerId) return res.status(400).json({ error: "player_id required" });
+  if (playerId === null)
+    return res.status(400).json({ error: "player_id required" });
 
   g.players.push(playerId);
 
@@ -135,7 +146,8 @@ app.post("/api/games/:id/place", (req, res) => {
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
-  if (!playerId) return res.status(400).json({ error: "player_id required" });
+  if (playerId === null)
+    return res.status(400).json({ error: "player_id required" });
 
   if (!ships || ships.length !== 3) {
     return res.status(400).json({ error: "must place 3 ships" });
