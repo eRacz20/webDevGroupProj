@@ -155,9 +155,19 @@ app.post("/api/games/:id/place", (req, res) => {
   if (!g) return res.status(404).json({ error: "not found" });
 
   const playerId = getPlayerId(req.body);
-  const ships = req.body.ships;
+  let ships = req.body.ships;
 
-  if (!Array.isArray(ships) || ships.length !== 3) {
+  if (!Array.isArray(ships)) {
+    return res.status(400).json({ error: "must place 3 ships" });
+  }
+
+  // 🔥 HANDLE BOTH FORMATS
+  if (ships.length === 3 && Array.isArray(ships[0]) && typeof ships[0][0] === "number") {
+    // flat format → convert to nested
+    ships = ships.map(coord => [coord]);
+  }
+
+  if (ships.length !== 3) {
     return res.status(400).json({ error: "must place 3 ships" });
   }
 
@@ -169,7 +179,6 @@ app.post("/api/games/:id/place", (req, res) => {
     }
 
     for (let coord of ship) {
-      // 🔥 SAFE VALIDATION
       if (!Array.isArray(coord) || coord.length !== 2) {
         return res.status(400).json({ error: "invalid coordinate" });
       }
@@ -181,7 +190,6 @@ app.post("/api/games/:id/place", (req, res) => {
         return res.status(400).json({ error: "invalid coordinate" });
       }
 
-      // out of bounds
       if (x < 0 || y < 0 || x >= g.grid_size || y >= g.grid_size) {
         return res.status(400).json({ error: "out of bounds" });
       }
@@ -201,6 +209,7 @@ app.post("/api/games/:id/place", (req, res) => {
 
   res.status(200).json({ message: "ok" });
 });
+
 // ----------------------
 // TEST SHIPS
 // ----------------------
