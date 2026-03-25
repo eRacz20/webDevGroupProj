@@ -26,6 +26,10 @@ function isValidCoord(x, y, size) {
   return x >= 0 && y >= 0 && x < size && y < size;
 }
 
+function getPlayerId(body) {
+  return body.playerId ?? body.player_id ?? null;
+}
+
 // ----------------------
 // RESET
 // ----------------------
@@ -48,6 +52,7 @@ app.post("/api/players", (req, res) => {
   }
 
   const id = nextPlayerId++;
+
   players[id] = {
     stats: {
       games_played: 0,
@@ -72,8 +77,8 @@ app.get("/api/players/:id/stats", (req, res) => {
 // CREATE GAME
 // ----------------------
 app.post("/api/games", (req, res) => {
-  const playerId = req.body.playerId || req.body.player_id;
-  const grid_size = req.body.grid_size || 10;
+  const playerId = getPlayerId(req.body);
+  const grid_size = req.body.grid_size ?? 10;
 
   if (!playerId) {
     return res.status(400).json({ error: "player_id required" });
@@ -106,10 +111,11 @@ app.get("/api/games/:id", (req, res) => {
 
 // ----------------------
 app.post("/api/games/:id/join", (req, res) => {
-  const playerId = req.body.playerId || req.body.player_id;
+  const playerId = getPlayerId(req.body);
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
+  if (!playerId) return res.status(400).json({ error: "player_id required" });
 
   g.players.push(playerId);
 
@@ -124,11 +130,12 @@ app.post("/api/games/:id/join", (req, res) => {
 // SHIP PLACEMENT
 // ----------------------
 app.post("/api/games/:id/place", (req, res) => {
-  const playerId = req.body.playerId || req.body.player_id;
+  const playerId = getPlayerId(req.body);
   const ships = req.body.ships;
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
+  if (!playerId) return res.status(400).json({ error: "player_id required" });
 
   if (!ships || ships.length !== 3) {
     return res.status(400).json({ error: "must place 3 ships" });
@@ -169,7 +176,7 @@ app.post("/api/games/:id/place", (req, res) => {
 app.post("/api/test/games/:id/ships", (req, res) => {
   if (!requireTestMode(req, res)) return;
 
-  const playerId = req.body.playerId || req.body.player_id;
+  const playerId = getPlayerId(req.body);
   const ships = req.body.ships;
   const g = games[req.params.id];
 
