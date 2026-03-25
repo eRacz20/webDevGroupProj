@@ -136,3 +136,21 @@ app.get("/", (req, res) => {
 // ----------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running"));
+
+app.post("/api/games/:id/place", (req, res) => {
+  const g = games[req.params.id];
+
+  if (!g) {
+    return res.status(404).json({ error: "not found" });
+  }
+
+  // minimal validation for A
+  const ships = req.body.ships;
+
+  if (!ships) {
+    return res.status(400).json({ error: "ships required" });
+  }
+
+  // just accept for now
+  res.status(200).json({ message: "ok" });
+});
