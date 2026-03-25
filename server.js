@@ -3,6 +3,8 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
+const TEST_PASSWORD = "clemson-test-2026";
+
 let players = {};
 let games = {};
 let nextPlayerId = 1;
@@ -18,6 +20,21 @@ function getPlayerId(body) {
   if (body.player_id !== undefined) return Number(body.player_id);
 
   return null;
+}
+
+function requireTestMode(req, res) {
+  const header = req.header("X-Test-Password");
+
+  if (header !== TEST_PASSWORD) {
+    res.status(403).json({ error: "Forbidden" });
+    return false;
+  }
+
+  return true;
+}
+
+function isValidCoord(x, y, size) {
+  return x >= 0 && y >= 0 && x < size && y < size;
 }
 
 // ----------------------
@@ -66,7 +83,7 @@ app.get("/api/players/:id/stats", (req, res) => {
 });
 
 // ----------------------
-// CREATE GAME (FIXED)
+// CREATE GAME (A + B)
 // ----------------------
 app.post("/api/games", (req, res) => {
   const body = req.body || {};
@@ -89,12 +106,14 @@ app.post("/api/games", (req, res) => {
     placed: {}
   };
 
-  // only add player if provided
   if (playerId !== null) {
     games[id].players.push(playerId);
   }
 
-  res.status(201).json({ game_id: id });
+  res.status(201).json({
+    game_id: id,
+    status: "waiting"
+  });
 });
 
 // ----------------------
@@ -108,7 +127,7 @@ app.get("/api/games/:id", (req, res) => {
 });
 
 // ----------------------
-// JOIN GAME (FIXED)
+// JOIN GAME
 // ----------------------
 app.post("/api/games/:id/join", (req, res) => {
   const g = games[req.params.id];
@@ -129,6 +148,92 @@ app.post("/api/games/:id/join", (req, res) => {
 });
 
 // ----------------------
+// SHIP PLACEMENT (FULL FIX)
+// ----------------------
+app.post("/api/games/:id/place", (req, res) => {
+  const g = games[req.params.id];
+  if (!g) return res.status(404).json({ error: "not found" });
+
+  const playerId = getPlayerId(req.body);
+  const ships = req.body.ships;
+
+  if (!ships || ships.length !== 3) {
+    return res.status(400).json({ error: "must place 3 ships" });
+  }
+
+  const occupied = new Set();
+
+  for (let ship of ships) {
+    for (let coord of ship) {
+      const [x, y] = coord;
+
+      if (!isValidCoord(x, y, g.grid_size)) {
+        return res.status(400).json({ error: "out of bounds" });
+      }
+
+      const key = `${x},${y}`;
+
+      if (occupied.has(key)) {
+        return res.status(400).json({ error: "overlap" });
+      }
+
+      occupied.add(key);
+    }
+  }
+
+  g.ships[playerId] = ships;
+  g.placed[playerId] = true;
+
+  res.status(200).json({ message: "ok" });
+});
+
+// ----------------------
+// TEST SHIPS
+// ----------------------
+app.post("/api/test/games/:id/ships", (req, res) => {
+  if (!requireTestMode(req, res)) return;
+
+  const g = games[req.params.id];
+  if (!g) return res.status(404).json({ error: "not found" });
+
+  const playerId = getPlayerId(req.body);
+  const ships = req.body.ships;
+
+  g.ships[playerId] = ships;
+  g.placed[playerId] = true;
+
+  res.status(200).json({ message: "ok" });
+});
+
+// ----------------------
+// BOARD REVEAL
+// ----------------------
+app.get("/api/test/games/:id/board/:playerId", (req, res) => {
+  if (!requireTestMode(req, res)) return;
+
+  const g = games[req.params.id];
+  if (!g) return res.status(404).json({ error: "not found" });
+
+  res.status(200).json({
+    ships: g.ships[req.params.playerId] || []
+  });
+});
+
+// ----------------------
+// FIRE GATING
+// ----------------------
+app.post("/api/games/:id/fire", (req, res) => {
+  const g = games[req.params.id];
+  if (!g) return res.status(404).json({ error: "not found" });
+
+  if (Object.keys(g.placed).length < 2) {
+    return res.status(400).json({ error: "not ready" });
+  }
+
+  res.status(200).json({ result: "ok" });
+});
+
+// ----------------------
 app.get("/", (req, res) => {
   res.send("Battleship API running");
 });
@@ -136,21 +241,3 @@ app.get("/", (req, res) => {
 // ----------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running"));
-
-app.post("/api/games/:id/place", (req, res) => {
-  const g = games[req.params.id];
-
-  if (!g) {
-    return res.status(404).json({ error: "not found" });
-  }
-
-  // minimal validation for A
-  const ships = req.body.ships;
-
-  if (!ships) {
-    return res.status(400).json({ error: "ships required" });
-  }
-
-  // just accept for now
-  res.status(200).json({ message: "ok" });
-});
