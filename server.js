@@ -34,19 +34,21 @@ app.post("/api/reset", (req, res) => {
   games = {};
   nextPlayerId = 1;
   nextGameId = 1;
-  res.json({ status: "reset" });
+  res.status(200).json({ status: "reset" });
 });
 
 // ----------------------
 // PLAYERS
 // ----------------------
 app.post("/api/players", (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ error: "username required" });
+  const username = req.body.username;
+
+  if (!username) {
+    return res.status(400).json({ error: "username required" });
+  }
 
   const id = nextPlayerId++;
   players[id] = {
-    id,
     stats: {
       games_played: 0,
       wins: 0,
@@ -67,70 +69,85 @@ app.get("/api/players/:id/stats", (req, res) => {
 });
 
 // ----------------------
-// GAMES
+// CREATE GAME
 // ----------------------
 app.post("/api/games", (req, res) => {
-  const { playerId, grid_size = 10 } = req.body;
+  const playerId = req.body.playerId || req.body.player_id;
+  const grid_size = req.body.grid_size || 10;
 
-  if (!playerId) return res.status(400).json({ error: "player_id required" });
-  if (grid_size < 5 || grid_size > 15)
+  if (!playerId) {
+    return res.status(400).json({ error: "player_id required" });
+  }
+
+  if (grid_size < 5 || grid_size > 15) {
     return res.status(400).json({ error: "invalid grid size" });
+  }
 
   const id = nextGameId++;
+
   games[id] = {
     game_id: id,
     grid_size,
     status: "waiting",
     players: [playerId],
     ships: {},
-    shots: [],
     placed: {}
   };
 
   res.status(201).json({ game_id: id });
 });
 
+// ----------------------
 app.get("/api/games/:id", (req, res) => {
   const g = games[req.params.id];
   if (!g) return res.status(404).json({ error: "not found" });
   res.json(g);
 });
 
+// ----------------------
 app.post("/api/games/:id/join", (req, res) => {
-  const { playerId } = req.body;
+  const playerId = req.body.playerId || req.body.player_id;
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
 
   g.players.push(playerId);
-  if (g.players.length >= 2) g.status = "placing";
 
-  res.json({ message: "joined" });
+  if (g.players.length >= 2) {
+    g.status = "placing";
+  }
+
+  res.status(200).json({ message: "joined" });
 });
 
 // ----------------------
 // SHIP PLACEMENT
 // ----------------------
 app.post("/api/games/:id/place", (req, res) => {
-  const { playerId, ships } = req.body;
+  const playerId = req.body.playerId || req.body.player_id;
+  const ships = req.body.ships;
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
-  if (!ships || ships.length !== 3)
+
+  if (!ships || ships.length !== 3) {
     return res.status(400).json({ error: "must place 3 ships" });
+  }
 
   const occupied = new Set();
 
   for (let ship of ships) {
     for (let coord of ship) {
-      const { x, y } = coord;
+      const [x, y] = coord;
 
-      if (!isValidCoord(x, y, g.grid_size))
+      if (!isValidCoord(x, y, g.grid_size)) {
         return res.status(400).json({ error: "out of bounds" });
+      }
 
       const key = `${x},${y}`;
-      if (occupied.has(key))
+      if (occupied.has(key)) {
         return res.status(400).json({ error: "overlap" });
+      }
 
       occupied.add(key);
     }
@@ -147,12 +164,13 @@ app.post("/api/games/:id/place", (req, res) => {
 });
 
 // ----------------------
-// TEST MODE SHIPS
+// TEST SHIPS
 // ----------------------
 app.post("/api/test/games/:id/ships", (req, res) => {
   if (!requireTestMode(req, res)) return;
 
-  const { playerId, ships } = req.body;
+  const playerId = req.body.playerId || req.body.player_id;
+  const ships = req.body.ships;
   const g = games[req.params.id];
 
   if (!g) return res.status(404).json({ error: "not found" });
@@ -160,7 +178,7 @@ app.post("/api/test/games/:id/ships", (req, res) => {
   g.ships[playerId] = ships;
   g.placed[playerId] = true;
 
-  res.json({ message: "test ships set" });
+  res.status(200).json({ message: "test ships set" });
 });
 
 // ----------------------
@@ -172,11 +190,13 @@ app.get("/api/test/games/:id/board/:playerId", (req, res) => {
   const g = games[req.params.id];
   if (!g) return res.status(404).json({ error: "not found" });
 
-  res.json({ ships: g.ships[req.params.playerId] || [] });
+  res.status(200).json({
+    ships: g.ships[req.params.playerId] || []
+  });
 });
 
 // ----------------------
-// FIRE (gating only)
+// FIRE GATING
 // ----------------------
 app.post("/api/games/:id/fire", (req, res) => {
   const g = games[req.params.id];
@@ -187,7 +207,7 @@ app.post("/api/games/:id/fire", (req, res) => {
     return res.status(400).json({ error: "not ready" });
   }
 
-  res.json({ result: "ok" });
+  res.status(200).json({ result: "ok" });
 });
 
 // ----------------------
