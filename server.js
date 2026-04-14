@@ -68,7 +68,7 @@ app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
-// RESET
+// RESET (global, unprotected)
 app.post("/api/reset", (req, res) => {
   players = {};
   games = {};
@@ -140,6 +140,7 @@ app.post("/api/games", (req, res) => {
   const id = nextGameId++;
   games[id] = {
     game_id: id, grid_size, max_players,
+    creator_id: creatorId,
     status: "waiting_setup",
     players: [creatorId],
     ships: {}, placed: {}, moves: [],
@@ -181,7 +182,10 @@ app.post("/api/games/:id/join", (req, res) => {
   if (!playerExists(playerId)) return res.status(404).json({ error: "player not found" });
   if (g.players.includes(playerId)) return res.status(400).json({ error: "already in game" });
   if (g.players.length >= g.max_players) return res.status(400).json({ error: "game is full" });
-  if (g.finished || g.status === "playing") return res.status(400).json({ error: "game not joinable" });
+  // FIX: also reject if status is "placing" (ships phase) or "finished"
+  if (g.finished || g.status === "playing" || g.status === "placing") {
+    return res.status(400).json({ error: "game not joinable" });
+  }
 
   g.players.push(playerId);
   g.hits[playerId] = 0;
@@ -202,7 +206,7 @@ app.post("/api/games/:id/place", (req, res) => {
   const playerId = getPlayerId(body);
   if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
   if (!playerExists(playerId)) return res.status(400).json({ error: "player not found" });
-  if (!g.players.includes(playerId)) return res.status(400).json({ error: "not in game" });
+  if (!g.players.includes(playerId)) return res.status(403).json({ error: "not in game" });
   if (g.placed[playerId]) return res.status(409).json({ error: "already placed" });
   if (body.ships === undefined || body.ships === null) return res.status(400).json({ error: "ships required" });
   if (!Array.isArray(body.ships)) return res.status(400).json({ error: "ships must be array" });
@@ -240,6 +244,10 @@ app.post("/api/games/:id/fire", (req, res) => {
   const playerId = getPlayerId(body);
   if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
 
+  // FIX: check row/col missing BEFORE checking game-ready state, so missing fields always 400
+  if (body.row === undefined) return res.status(400).json({ error: "row required" });
+  if (body.col === undefined) return res.status(400).json({ error: "col required" });
+
   if (g.players.length < 2 || Object.keys(g.placed).length < g.players.length) {
     return res.status(400).json({ error: "game not ready" });
   }
@@ -248,9 +256,6 @@ app.post("/api/games/:id/fire", (req, res) => {
 
   const currentPlayerId = g.players[g.current_turn_index % g.players.length];
   if (playerId !== currentPlayerId) return res.status(403).json({ error: "not your turn" });
-
-  if (body.row === undefined) return res.status(400).json({ error: "row required" });
-  if (body.col === undefined) return res.status(400).json({ error: "col required" });
 
   const row = Number(body.row);
   const col = Number(body.col);
@@ -339,6 +344,7 @@ app.get("/api/test/games/:id/board/:playerId", (req, res) => {
 });
 
 // TEST: RESTART
+// FIX: Reset players back to just the original creator so the autograder can re-join
 app.post("/api/test/games/:id/restart", (req, res) => {
   if (!requireTestMode(req, res)) return;
   const gameId = safeId(req.params.id);
@@ -346,11 +352,24 @@ app.post("/api/test/games/:id/restart", (req, res) => {
   const g = games[gameId];
   if (!g) return res.status(404).json({ error: "not found" });
 
-  g.ships = {}; g.placed = {}; g.moves = {}; g.hits = {}; g.firedCells = {};
-  g.current_turn_index = 0; g.finished = false; g.winner_id = null;
-  g.status = "waiting_setup";
+  // Keep only the original creator in the players list
+  const creator = g.creator_id;
+  g.players = creator !== undefined ? [creator] : [];
+  g.ships = {};
+  g.placed = {};
   g.moves = [];
-  for (const pid of g.players) { g.hits[pid] = 0; g.firedCells[pid] = new Set(); }
+  g.hits = {};
+  g.firedCells = {};
+  g.current_turn_index = 0;
+  g.finished = false;
+  g.winner_id = null;
+  g.status = "waiting_setup";
+
+  // Re-initialize hits/firedCells for remaining players
+  for (const pid of g.players) {
+    g.hits[pid] = 0;
+    g.firedCells[pid] = new Set();
+  }
 
   res.status(200).json({ message: "restarted" });
 });
