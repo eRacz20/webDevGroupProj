@@ -81,63 +81,42 @@ app.post("/api/reset", (req, res) => {
   res.status(200).json({ status: "reset" });
 });
 
-// LIST PLAYERS
-app.post("/api/players", async (req, res) => {
-  const { username } = req.body;
 
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({ error: "invalid username" });
-  }
-
-  // check duplicate
-  const existing = await pool.query(
-    "SELECT * FROM players WHERE username = $1",
-    [username]
-  );
-
-  if (existing.rows.length > 0) {
-    return res.status(409).json({ error: "username exists" });
-  }
-
-  const result = await pool.query(
-    "INSERT INTO players (username) VALUES ($1) RETURNING id",
-    [username]
-  );
-
-  return res.status(201).json({ player_id: result.rows[0].id });
-});
 
 app.post("/api/players", async (req, res) => {
-  const username = req.body?.username;
-
-  if (username === undefined || username === null || (typeof username === "string" && username.length === 0)) {
-    return res.status(400).json({ error: "username required" });
-  }
-  if (!isValidUsername(username)) {
-    return res.status(400).json({ error: "invalid username" });
-  }
-  if (Object.values(players).find(p => p.username === username)) {
-    return res.status(409).json({ error: "username taken" });
-  }
-
-  const id = nextPlayerId++;
-  players[id] = {
-    username,
-    stats: { games_played: 0, wins: 0, losses: 0, total_shots: 0, total_hits: 0, accuracy: 0.0 }
-  };
-
-  // ✅ DB SAVE
   try {
-    await pool.query(
-      "INSERT INTO players (id, username) VALUES ($1, $2)",
-      [id, username]
-    );
-  } catch (err) {
-    console.error("DB players:", err.message);
-  }
+    const username = req.body?.username;
 
-  res.status(201).json({ player_id: id });
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({ error: "username required" });
+    }
+
+    if (!/^[a-zA-Z0-9_]+$/.test(username) || username.length > 30) {
+      return res.status(400).json({ error: "invalid username" });
+    }
+
+    const existing = await pool.query(
+      "SELECT * FROM players WHERE username = $1",
+      [username]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: "username exists" });
+    }
+
+    const result = await pool.query(
+      "INSERT INTO players (username) VALUES ($1) RETURNING id",
+      [username]
+    );
+
+    return res.status(201).json({ player_id: result.rows[0].id });
+
+  } catch (err) {
+    console.error("PLAYER ERROR:", err);
+    return res.status(500).json({ error: "server error" });
+  }
 });
+
 
 // GET PLAYER STATS
 app.get("/api/players/:id/stats", (req, res) => {
