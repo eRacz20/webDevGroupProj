@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Battleship</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    button { margin: 5px; }
+    .grid {
+      display: grid;
+      gap: 2px;
+      margin-top: 10px;
+    }
+    .cell {
+      width: 30px;
+      height: 30px;
+      background: lightblue;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .hit { background: red; }
+    .miss { background: gray; }
+    .ship { background: green; }
+  </style>
+</head>
+<body>
+
+<h2>Battleship Client</h2>
+
+<!-- REGISTER -->
+<input id="username" placeholder="username">
+<button onclick="register()">Register</button>
+
+<br><br>
+
+<!-- GAME ACTIONS -->
+<button onclick="createGame()">Create Game</button>
+<button onclick="loadGames()">Refresh Games</button>
+
+<ul id="games"></ul>
+
+<h3>Game Board</h3>
+<div id="info"></div>
+<div id="grid" class="grid"></div>
+
+<button onclick="placeShips()">Place Ships</button>
+<button onclick="fireMode = true">Fire Mode</button>
+
+<script>
+const API = "https://webdevgroupproj.onrender.com"; 
+
+let playerId = null;
+let gameId = null;
+let gridSize = 10;
+let ships = [];
+let fireMode = false;
+
+// REGISTER
+async function register() {
+  const username = document.getElementById("username").value;
+
+  const res = await fetch(API + "/api/players", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ username })
+  });
+
+  const data = await res.json();
+  playerId = data.player_id;
+
+  alert("Registered as player " + playerId);
+}
+
+// CREATE GAME
+async function createGame() {
+  const res = await fetch(API + "/api/games", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      creator_id: playerId,
+      grid_size: 10,
+      max_players: 2
+    })
+  });
+
+  const data = await res.json();
+  gameId = data.game_id;
+
+  alert("Game created: " + gameId);
+}
+
+// LOAD GAMES
+async function loadGames() {
+  const res = await fetch(API + "/api/games");
+  const games = await res.json();
+
+  const list = document.getElementById("games");
+  list.innerHTML = "";
+
+  games.forEach(g => {
+    const li = document.createElement("li");
+    li.innerText = `Game ${g.game_id} (${g.status})`;
+
+    const btn = document.createElement("button");
+    btn.innerText = "Join";
+    btn.onclick = () => joinGame(g.game_id);
+
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+}
+
+// JOIN GAME
+async function joinGame(id) {
+  gameId = id;
+
+  await fetch(API + `/api/games/${id}/join`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ player_id: playerId })
+  });
+
+  drawGrid(10);
+}
+
+// DRAW GRID
+function drawGrid(size) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  grid.style.gridTemplateColumns = `repeat(${size}, 30px)`;
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const div = document.createElement("div");
+      div.className = "cell";
+
+      div.onclick = () => handleClick(r, c, div);
+
+      grid.appendChild(div);
+    }
+  }
+}
+
+// CLICK HANDLER
+async function handleClick(r, c, cell) {
+  if (!gameId) {
+    alert("Join a game first");
+    return;
+  }
+
+  if (!playerId) {
+    alert("Register first");
+    return;
+  }
+
+  if (fireMode) {
+    const res = await fetch(API + `/api/games/${gameId}/fire`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        player_id: playerId,
+        row: r,
+        col: c
+      })
+    });
+
+    const data = await res.json();
+
+    if (data.result === "hit") {
+      cell.classList.add("hit");
+    } else if (data.result === "miss") {
+      cell.classList.add("miss");
+    } else {
+      alert(data.error || "Error firing");
+    }
+  } else {
+    if (ships.length < 3) {
+      ships.push({ row: r, col: c });
+      cell.classList.add("ship");
+    }
+  }
+}
+
+// PLACE SHIPS
+async function placeShips() {
+  if (ships.length !== 3) {
+    alert("Place exactly 3 ships");
+    return;
+  }
+
+  const res = await fetch(API + `/api/games/${gameId}/place`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      player_id: playerId,
+      ships: ships
+    })
+  });
+
+  const data = await res.json();
+
+  if (data.status === "placed") {
+    alert("Ships placed!");
+  } else {
+    alert(data.error || "Error placing ships");
+  }
+}
+</script>
+
+</body>
+</html>
