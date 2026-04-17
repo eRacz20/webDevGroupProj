@@ -40,6 +40,9 @@
 
 <ul id="games"></ul>
 
+<!-- ✅ NEW CURRENT GAME DISPLAY -->
+<div id="currentGame" style="margin:10px 0; font-weight:bold;"></div>
+
 <h3>Game Board</h3>
 <div id="info"></div>
 <div id="grid" class="grid"></div>
@@ -56,6 +59,17 @@ let gridSize = 10;
 let ships = [];
 let fireMode = false;
 
+// ✅ NEW FUNCTION
+function updateCurrentGame() {
+  const div = document.getElementById("currentGame");
+
+  if (gameId && playerId) {
+    div.innerText = `Player ${playerId} in Game ${gameId}`;
+  } else {
+    div.innerText = "Not in a game";
+  }
+}
+
 // REGISTER
 async function register() {
   const username = document.getElementById("username").value;
@@ -68,6 +82,8 @@ async function register() {
 
   const data = await res.json();
   playerId = data.player_id;
+
+  updateCurrentGame(); // ✅ update display
 
   alert("Registered as player " + playerId);
 }
@@ -85,7 +101,18 @@ async function createGame() {
   });
 
   const data = await res.json();
+  console.log("CREATE GAME:", data);
+
+  if (!data.game_id) {
+    alert(data.error || "Error creating game");
+    return;
+  }
+
   gameId = data.game_id;
+
+  updateCurrentGame(); // ✅ update display
+
+  drawGrid(10);
 
   alert("Game created: " + gameId);
 }
@@ -115,11 +142,21 @@ async function loadGames() {
 async function joinGame(id) {
   gameId = id;
 
-  await fetch(API + `/api/games/${id}/join`, {
+  const res = await fetch(API + `/api/games/${id}/join`, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({ player_id: playerId })
   });
+
+  const data = await res.json();
+  console.log("JOIN:", data);
+
+  if (data.error) {
+    alert(data.error);
+    return;
+  }
+
+  updateCurrentGame(); // ✅ update display
 
   drawGrid(10);
 }
@@ -206,6 +243,9 @@ async function placeShips() {
     alert(data.error || "Error placing ships");
   }
 }
+
+// ✅ initialize on load
+updateCurrentGame();
 </script>
 
 </body>
