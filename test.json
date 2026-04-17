@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Player can successfully join a created game",
+    "why": "When a game exists in waiting_setup, a valid player should be able to join and receive a 200 response",
+    "method": "POST",
+    "endpoint": "/api/games/{id}/join",
+    "headers": {},
+    "body": { "player_id": 2 },
+    "expected_status": 200,
+    "expected_response_contains": { "player_id": "__any_integer__" },
+    "requires": "game_created"
+  },
+  {
+    "name": "Duplicate join attempt is rejected",
+    "why": "A player already in the game should not be able to join again, and the server should return 400",
+    "method": "POST",
+    "endpoint": "/api/games/{id}/join",
+    "headers": {},
+    "body": { "player_id": 1 },
+    "expected_status": 400,
+    "expected_response_contains": {},
+    "requires": "game_joined"
+  },
+  {
+    "name": "Player 2 cannot fire before Player 1",
+    "why": "The game starts with player 1's turn, so player 2 firing first should return 403 forbidden",
+    "method": "POST",
+    "endpoint": "/api/games/{id}/fire",
+    "headers": {},
+    "body": { "player_id": 2, "row": 3, "col": 3 },
+    "expected_status": 403,
+    "expected_response_contains": { "error": "forbidden" },
+    "requires": "game_playing"
+  },
+  {
+    "name": "Player 1 fires valid shot and gets result",
+    "why": "A valid move during gameplay should return 200 and include the next player turn",
+    "method": "POST",
+    "endpoint": "/api/games/{id}/fire",
+    "headers": {},
+    "body": { "player_id": 1, "row": 2, "col": 2 },
+    "expected_status": 200,
+    "expected_response_contains": { "next_player_id": "__any_integer__" },
+    "requires": "game_playing"
+  },
+  {
+    "name": "Game stats endpoint returns valid data during game",
+    "why": "Fetching stats during an active game should return 200 and include game-related fields",
+    "method": "GET",
+    "endpoint": "/api/games/{id}/stats",
+    "headers": {},
+    "body": null,
+    "expected_status": 200,
+    "expected_response_contains": {},
+    "requires": "game_playing"
+  }
+]

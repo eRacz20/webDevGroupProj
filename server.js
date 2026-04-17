@@ -85,9 +85,9 @@ app.get("/api/players", (req, res) => {
   })));
 });
 
-// CREATE PLAYER
-app.post("/api/players", (req, res) => {
+app.post("/api/players", async (req, res) => {
   const username = req.body?.username;
+
   if (username === undefined || username === null || (typeof username === "string" && username.length === 0)) {
     return res.status(400).json({ error: "username required" });
   }
@@ -97,8 +97,23 @@ app.post("/api/players", (req, res) => {
   if (Object.values(players).find(p => p.username === username)) {
     return res.status(409).json({ error: "username taken" });
   }
+
   const id = nextPlayerId++;
-  players[id] = { username, stats: { games_played: 0, wins: 0, losses: 0, total_shots: 0, total_hits: 0, accuracy: 0.0 } };
+  players[id] = {
+    username,
+    stats: { games_played: 0, wins: 0, losses: 0, total_shots: 0, total_hits: 0, accuracy: 0.0 }
+  };
+
+  // ✅ DB SAVE
+  try {
+    await pool.query(
+      "INSERT INTO players (id, username) VALUES ($1, $2)",
+      [id, username]
+    );
+  } catch (err) {
+    console.error("DB players:", err.message);
+  }
+
   res.status(201).json({ player_id: id });
 });
 
@@ -118,8 +133,9 @@ app.get("/api/games", (req, res) => {
   })));
 });
 
-// CREATE GAME
-app.post("/api/games", (req, res) => {
+//create game
+
+app.post("/api/games", async (req, res) => {
   const body = req.body || {};
   if (body.creator_id === undefined && body.player_id === undefined && body.playerId === undefined) {
     return res.status(400).json({ error: "creator_id required" });
@@ -149,6 +165,22 @@ app.post("/api/games", (req, res) => {
     current_turn_index: 0,
     finished: false, winner_id: null
   };
+
+  // ✅ DB SAVE
+  try {
+    await pool.query(
+      "INSERT INTO games (id, grid_size, max_players, creator_id, status) VALUES ($1,$2,$3,$4,$5)",
+      [id, grid_size, max_players, creatorId, "waiting_setup"]
+    );
+
+    await pool.query(
+      "INSERT INTO game_players (game_id, player_id) VALUES ($1,$2)",
+      [id, creatorId]
+    );
+  } catch (err) {
+    console.error("DB games:", err.message);
+  }
+
   res.status(201).json({ game_id: id, status: "waiting_setup" });
 });
 
@@ -167,7 +199,7 @@ app.get("/api/games/:id", (req, res) => {
 });
 
 // JOIN GAME
-app.post("/api/games/:id/join", (req, res) => {
+app.post("/api/games/:id/join", async (req, res) => {
   const gameId = safeId(req.params.id);
   if (gameId === null) return res.status(404).json({ error: "not found" });
   const g = games[gameId];
@@ -182,7 +214,6 @@ app.post("/api/games/:id/join", (req, res) => {
   if (!playerExists(playerId)) return res.status(404).json({ error: "player not found" });
   if (g.players.includes(playerId)) return res.status(400).json({ error: "already in game" });
   if (g.players.length >= g.max_players) return res.status(400).json({ error: "game is full" });
-  // FIX: also reject if status is "placing" (ships phase) or "finished"
   if (g.finished || g.status === "playing" || g.status === "placing") {
     return res.status(400).json({ error: "game not joinable" });
   }
@@ -192,11 +223,21 @@ app.post("/api/games/:id/join", (req, res) => {
   g.firedCells[playerId] = new Set();
   if (g.players.length >= g.max_players) g.status = "placing";
 
+  // ✅ DB SAVE
+  try {
+    await pool.query(
+      "INSERT INTO game_players (game_id, player_id) VALUES ($1,$2)",
+      [gameId, playerId]
+    );
+  } catch (err) {
+    console.error("DB join:", err.message);
+  }
+
   res.status(200).json({ status: "joined" });
 });
 
 // PLACE SHIPS
-app.post("/api/games/:id/place", (req, res) => {
+app.post("/api/games/:id/place", async (req, res) => {
   const gameId = safeId(req.params.id);
   if (gameId === null) return res.status(404).json({ error: "not found" });
   const g = games[gameId];
@@ -229,11 +270,23 @@ app.post("/api/games/:id/place", (req, res) => {
   if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
   if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) g.status = "playing";
 
+  // ✅ DB SAVE
+  try {
+    for (const c of coords) {
+      await pool.query(
+        "INSERT INTO ships (game_id, player_id, row, col) VALUES ($1,$2,$3,$4)",
+        [gameId, playerId, c.row, c.col]
+      );
+    }
+  } catch (err) {
+    console.error("DB ships:", err.message);
+  }
+
   res.status(200).json({ status: "placed" });
 });
 
 // FIRE
-app.post("/api/games/:id/fire", (req, res) => {
+app.post("/api/games/:id/fire", async (req, res) => {
   const gameId = safeId(req.params.id);
   if (gameId === null) return res.status(404).json({ error: "not found" });
   const g = games[gameId];
@@ -244,7 +297,6 @@ app.post("/api/games/:id/fire", (req, res) => {
   const playerId = getPlayerId(body);
   if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
 
-  // FIX: check row/col missing BEFORE checking game-ready state, so missing fields always 400
   if (body.row === undefined) return res.status(400).json({ error: "row required" });
   if (body.col === undefined) return res.status(400).json({ error: "col required" });
 
@@ -286,6 +338,17 @@ app.post("/api/games/:id/fire", (req, res) => {
   shooter.stats.accuracy = shooter.stats.total_hits / shooter.stats.total_shots;
 
   g.moves.push({ player_id: playerId, row, col, result: hitResult, timestamp: new Date().toISOString() });
+
+  // ✅ DB SAVE
+  try {
+    await pool.query(
+      "INSERT INTO moves (game_id, player_id, row, col, result) VALUES ($1,$2,$3,$4,$5)",
+      [gameId, playerId, row, col, hitResult]
+    );
+  } catch (err) {
+    console.error("DB moves:", err.message);
+  }
+
   g.current_turn_index += 1;
   const nextPId = g.players[g.current_turn_index % g.players.length];
 
@@ -309,7 +372,6 @@ app.post("/api/games/:id/fire", (req, res) => {
 
   res.status(200).json({ result: hitResult, next_player_id: nextPId, game_status: g.status });
 });
-
 // MOVE HISTORY
 app.get("/api/games/:id/moves", (req, res) => {
   const gameId = safeId(req.params.id);
