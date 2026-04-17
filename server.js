@@ -82,11 +82,29 @@ app.post("/api/reset", (req, res) => {
 });
 
 // LIST PLAYERS
-app.get("/api/players", (req, res) => {
-  res.status(200).json(Object.entries(players).map(([id, p]) => ({
-    player_id: Number(id),
-    username: p.username
-  })));
+app.post("/api/players", async (req, res) => {
+  const { username } = req.body;
+
+  if (!username || typeof username !== "string") {
+    return res.status(400).json({ error: "invalid username" });
+  }
+
+  // check duplicate
+  const existing = await pool.query(
+    "SELECT * FROM players WHERE username = $1",
+    [username]
+  );
+
+  if (existing.rows.length > 0) {
+    return res.status(409).json({ error: "username exists" });
+  }
+
+  const result = await pool.query(
+    "INSERT INTO players (username) VALUES ($1) RETURNING id",
+    [username]
+  );
+
+  return res.status(201).json({ player_id: result.rows[0].id });
 });
 
 app.post("/api/players", async (req, res) => {
@@ -204,40 +222,52 @@ app.get("/api/games/:id", (req, res) => {
 
 // JOIN GAME
 app.post("/api/games/:id/join", async (req, res) => {
-  const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not found" });
-  const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not found" });
+  const gameId = parseInt(req.params.id);
+  const { player_id } = req.body;
 
-  const body = req.body || {};
-  if (body.player_id !== undefined && typeof body.player_id === "string") {
-    return res.status(400).json({ error: "player_id must be integer" });
-  }
-  const playerId = getPlayerId(body);
-  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
-  if (!playerExists(playerId)) return res.status(404).json({ error: "player not found" });
-  if (g.players.includes(playerId)) return res.status(400).json({ error: "already in game" });
-  if (g.players.length >= g.max_players) return res.status(400).json({ error: "game is full" });
-  if (g.finished || g.status === "playing" || g.status === "placing") {
-    return res.status(400).json({ error: "game not joinable" });
+  if (!player_id) {
+    return res.status(400).json({ error: "player_id required" });
   }
 
-  g.players.push(playerId);
-  g.hits[playerId] = 0;
-  g.firedCells[playerId] = new Set();
-  if (g.players.length >= g.max_players) g.status = "placing";
-
-  // ✅ DB SAVE
-  try {
-    await pool.query(
-      "INSERT INTO game_players (game_id, player_id) VALUES ($1,$2)",
-      [gameId, playerId]
-    );
-  } catch (err) {
-    console.error("DB join:", err.message);
+  // check game exists
+  const game = await pool.query("SELECT * FROM games WHERE id = $1", [gameId]);
+  if (game.rows.length === 0) {
+    return res.status(404).json({ error: "game not found" });
   }
 
-  res.status(200).json({ status: "joined" });
+  // check player exists
+  const player = await pool.query("SELECT * FROM players WHERE id = $1", [player_id]);
+  if (player.rows.length === 0) {
+    return res.status(404).json({ error: "player not found" });
+  }
+
+  // check if already in game
+  const existing = await pool.query(
+    "SELECT * FROM game_players WHERE game_id = $1 AND player_id = $2",
+    [gameId, player_id]
+  );
+
+  if (existing.rows.length > 0) {
+    return res.status(400).json({ error: "already joined" });
+  }
+
+  // check if full
+  const count = await pool.query(
+    "SELECT COUNT(*) FROM game_players WHERE game_id = $1",
+    [gameId]
+  );
+
+  if (parseInt(count.rows[0].count) >= game.rows[0].max_players) {
+    return res.status(400).json({ error: "game full" });
+  }
+
+  // insert
+  await pool.query(
+    "INSERT INTO game_players (game_id, player_id) VALUES ($1, $2)",
+    [gameId, player_id]
+  );
+
+  return res.status(200).json({ status: "joined" });
 });
 
 // PLACE SHIPS
