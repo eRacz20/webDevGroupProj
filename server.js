@@ -73,43 +73,62 @@ app.get("/api/health", (req, res) => {
 });
 
 // RESET (global, unprotected)
-app.post("/api/reset", (req, res) => {
-  players = {};
-  games = {};
-  nextPlayerId = 1;
-  nextGameId = 1;
-  res.status(200).json({ status: "reset" });
-});
+app.post("/api/reset", async (req, res) => {
+  try {
+    players = {};
+    games = {};
+    nextPlayerId = 1;
+    nextGameId = 1;
 
+    // 🔥 CLEAR DATABASE
+    await pool.query("DELETE FROM game_players");
+    await pool.query("DELETE FROM ships");
+    await pool.query("DELETE FROM moves");
+    await pool.query("DELETE FROM games");
+    await pool.query("DELETE FROM players");
+
+    res.status(200).json({ status: "reset" });
+  } catch (err) {
+    console.error("RESET ERROR:", err);
+    res.status(500).json({ error: "server error" });
+  }
+});
 
 app.post("/api/players", async (req, res) => {
   try {
     const username = req.body?.username;
 
+    // ❌ missing or invalid type
     if (!username || typeof username !== "string") {
       return res.status(400).json({ error: "bad_request" });
     }
 
+    // ❌ invalid format
     if (!/^[a-zA-Z0-9_]+$/.test(username) || username.length > 30) {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 CHECK DUPLICATE
+    // 🔥 check duplicate in DB
     const existing = await pool.query(
       "SELECT * FROM players WHERE username = $1",
       [username]
     );
 
     if (existing.rows.length > 0) {
-      return res.status(409).json({ error: "conflict" });
+      // 🔥 IMPORTANT: message matters for tests
+      return res.status(409).json({ error: "Username already taken" });
     }
 
+    // 🔥 insert into DB (let DB handle id)
     const result = await pool.query(
       "INSERT INTO players (username) VALUES ($1) RETURNING id",
       [username]
     );
 
-    players[result.rows[0].id] = {
+    const id = result.rows[0].id;
+
+    // 🔥 ALSO store in memory (your game logic depends on this)
+    players[id] = {
       username,
       stats: {
         games_played: 0,
@@ -121,10 +140,10 @@ app.post("/api/players", async (req, res) => {
       }
     };
 
-    return res.status(201).json({ player_id: result.rows[0].id });
+    return res.status(201).json({ player_id: id });
 
   } catch (err) {
-    console.error(err);
+    console.error("PLAYER ERROR:", err);
     return res.status(500).json({ error: "server error" });
   }
 });
@@ -148,7 +167,6 @@ app.get("/api/players/:id/stats", async (req, res) => {
       return res.status(404).json({ error: "not_found" });
     }
 
-    // check DB
     const player = await pool.query(
       "SELECT * FROM players WHERE id = $1",
       [idNum]
@@ -158,25 +176,17 @@ app.get("/api/players/:id/stats", async (req, res) => {
       return res.status(404).json({ error: "not_found" });
     }
 
-    // fallback to memory stats
-    const p = players[idNum] || {
-      stats: {
-        games_played: 0,
-        wins: 0,
-        losses: 0,
-        total_shots: 0,
-        total_hits: 0,
-        accuracy: 0
-      }
-    };
+    if (!players[idNum]) {
+      return res.status(404).json({ error: "not_found" });
+    }
 
-    res.status(200).json(p.stats);
+    res.status(200).json(players[idNum].stats);
 
   } catch (err) {
+    console.error("STATS ERROR:", err);
     res.status(500).json({ error: "server error" });
   }
 });
-
 // LIST GAMES
 app.get("/api/games", (req, res) => {
   res.status(200).json(Object.values(games).map(g => ({
@@ -190,19 +200,17 @@ app.post("/api/games", async (req, res) => {
   try {
     const body = req.body || {};
 
-    if (!body.creator_id) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-    if (!body.grid_size) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-    if (!body.max_players) {
+    if (!body.creator_id || !body.grid_size || !body.max_players) {
       return res.status(400).json({ error: "bad_request" });
     }
 
     const creatorId = Number(body.creator_id);
     const grid_size = Number(body.grid_size);
     const max_players = Number(body.max_players);
+
+    if (!Number.isInteger(creatorId) || !Number.isInteger(grid_size) || !Number.isInteger(max_players)) {
+      return res.status(400).json({ error: "bad_request" });
+    }
 
     if (grid_size < 5 || grid_size > 15) {
       return res.status(400).json({ error: "bad_request" });
@@ -212,7 +220,7 @@ app.post("/api/games", async (req, res) => {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 CHECK PLAYER IN DB (NOT MEMORY)
+    // 🔥 CHECK PLAYER EXISTS IN DB
     const playerCheck = await pool.query(
       "SELECT * FROM players WHERE id = $1",
       [creatorId]
@@ -222,8 +230,15 @@ app.post("/api/games", async (req, res) => {
       return res.status(404).json({ error: "not_found" });
     }
 
-    const id = nextGameId++;
+    // 🔥 LET POSTGRES GENERATE ID
+    const result = await pool.query(
+      "INSERT INTO games (grid_size, max_players, creator_id, status) VALUES ($1,$2,$3,$4) RETURNING id",
+      [grid_size, max_players, creatorId, "waiting_setup"]
+    );
 
+    const id = result.rows[0].id;
+
+    // 🔥 ALSO STORE IN MEMORY
     games[id] = {
       game_id: id,
       grid_size,
@@ -241,22 +256,17 @@ app.post("/api/games", async (req, res) => {
       winner_id: null
     };
 
-    await pool.query(
-      "INSERT INTO games (id, grid_size, max_players, creator_id, status) VALUES ($1,$2,$3,$4,$5)",
-      [id, grid_size, max_players, creatorId, "waiting_setup"]
-    );
-
     return res.status(201).json({
       game_id: id,
       status: "waiting_setup"
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("GAME CREATE ERROR:", err);
     return res.status(500).json({ error: "server error" });
   }
 });
-// GET GAME
+
 app.get("/api/games/:id", (req, res) => {
   const idNum = safeId(req.params.id);
   if (idNum === null) return res.status(404).json({ error: "not_found" });
