@@ -2,64 +2,14 @@ import express from "express";
 import cors from "cors";
 import { pool } from "./db.js";
 
-const app = express(); 
+const app = express();
 
-app.use(cors());        
+app.use(cors());
 app.use(express.json());
 
 const TEST_PASSWORD = "clemson-test-2026";
 
-let players = {};
-let games = {};
-let nextPlayerId = 1;
-let nextGameId = 1;
-
-function getPlayerId(body) {
-  if (!body) return null;
-  if (body.player_id !== undefined) return Number(body.player_id);
-  if (body.playerId !== undefined) return Number(body.playerId);
-  if (body.creator_id !== undefined) return Number(body.creator_id);
-  return null;
-}
-
-function requireTestMode(req, res) {
-  const header = req.header("X-Test-Password");
-  if (header !== TEST_PASSWORD) {
-    res.status(403).json({ error: "Forbidden" });
-    return false;
-  }
-  return true;
-}
-
-function parseCoord(c) {
-  if (c !== null && typeof c === "object" && !Array.isArray(c)) {
-    const row = c.row !== undefined ? Number(c.row) : (c.x !== undefined ? Number(c.x) : NaN);
-    const col = c.col !== undefined ? Number(c.col) : (c.y !== undefined ? Number(c.y) : NaN);
-    return { row, col };
-  }
-  return null;
-}
-
-function normalizeShips(raw) {
-  if (!Array.isArray(raw) || raw.length !== 3) return null;
-  const coords = [];
-  for (const item of raw) {
-    const coord = parseCoord(item);
-    if (!coord) return null;
-    coords.push(coord);
-  }
-  return coords;
-}
-
-function playerExists(id) {
-  return players[id] !== undefined;
-}
-
-function isValidUsername(username) {
-  if (typeof username !== "string") return false;
-  if (username.length === 0 || username.length > 30) return false;
-  return /^[a-zA-Z0-9_]+$/.test(username);
-}
+// ─── helpers ────────────────────────────────────────────────────────────────
 
 function safeId(param) {
   const n = Number(param);
@@ -67,549 +17,630 @@ function safeId(param) {
   return n;
 }
 
-// HEALTH
-app.get("/api/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
-});
+function requireTestMode(req, res) {
+  if (req.header("X-Test-Password") !== TEST_PASSWORD) {
+    res.status(403).json({ error: "forbidden" });
+    return false;
+  }
+  return true;
+}
 
-// RESET (global, unprotected)
-app.post("/api/reset", async (req, res) => {
+// ─── health ─────────────────────────────────────────────────────────────────
+
+app.get("/api/health", (_req, res) => res.status(200).json({ status: "ok" }));
+
+// ─── reset (dev utility) ────────────────────────────────────────────────────
+
+app.post("/api/reset", async (_req, res) => {
   try {
-    players = {};
-    games = {};
-    nextPlayerId = 1;
-    nextGameId = 1;
-
-    // 🔥 CLEAR DATABASE
     await pool.query("DELETE FROM game_players");
     await pool.query("DELETE FROM ships");
     await pool.query("DELETE FROM moves");
     await pool.query("DELETE FROM games");
     await pool.query("DELETE FROM players");
-
     res.status(200).json({ status: "reset" });
-  } catch (err) {
-    console.error("RESET ERROR:", err);
+  } catch {
     res.status(500).json({ error: "server error" });
   }
 });
 
+// ─── players ────────────────────────────────────────────────────────────────
+
+// GET /api/players
+app.get("/api/players", async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT id, username FROM players ORDER BY id");
+    res.status(200).json(result.rows);
+  } catch {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// POST /api/players
 app.post("/api/players", async (req, res) => {
   try {
     const username = req.body?.username;
 
-    // ❌ missing or invalid type
-    if (!username || typeof username !== "string") {
+    if (!username || typeof username !== "string" || username.trim() === "") {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // ❌ invalid format
     if (!/^[a-zA-Z0-9_]+$/.test(username) || username.length > 30) {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 check duplicate in DB
+    // Check duplicate in DB (source of truth — works across restarts)
     const existing = await pool.query(
-      "SELECT * FROM players WHERE username = $1",
+      "SELECT id FROM players WHERE username = $1",
       [username]
     );
-
     if (existing.rows.length > 0) {
-      // 🔥 IMPORTANT: message matters for tests
-      return res.status(409).json({ error: "Username already taken" });
+      return res.status(409).json({ error: "conflict" });
     }
 
-    // 🔥 insert into DB (let DB handle id)
     const result = await pool.query(
       "INSERT INTO players (username) VALUES ($1) RETURNING id",
       [username]
     );
 
-    const id = result.rows[0].id;
-
-    // 🔥 ALSO store in memory (your game logic depends on this)
-    players[id] = {
-      username,
-      stats: {
-        games_played: 0,
-        wins: 0,
-        losses: 0,
-        total_shots: 0,
-        total_hits: 0,
-        accuracy: 0
-      }
-    };
-
-    return res.status(201).json({ player_id: id });
-
-  } catch (err) {
-    console.error("PLAYER ERROR:", err);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-
-
-app.get("/api/players", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT id, username FROM players");
-    res.status(200).json(result.rows);
-  } catch (err) {
+    res.status(201).json({ player_id: result.rows[0].id });
+  } catch {
     res.status(500).json({ error: "server error" });
   }
 });
 
-
-// GET PLAYER STATS
+// GET /api/players/:id/stats
 app.get("/api/players/:id/stats", async (req, res) => {
   try {
-    const idNum = safeId(req.params.id);
-    if (idNum === null) {
-      return res.status(404).json({ error: "not_found" });
-    }
+    const id = safeId(req.params.id);
+    if (id === null) return res.status(404).json({ error: "not_found" });
 
-    const player = await pool.query(
+    const result = await pool.query(
       "SELECT * FROM players WHERE id = $1",
-      [idNum]
+      [id]
     );
-
-    if (player.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "not_found" });
     }
 
-    if (!players[idNum]) {
-      return res.status(404).json({ error: "not_found" });
-    }
+    const p = result.rows[0];
+    const total_shots = Number(p.total_shots ?? 0);
+    const total_hits  = Number(p.total_hits  ?? 0);
+    const accuracy    = total_shots > 0
+      ? Math.round((total_hits / total_shots) * 100) / 100
+      : 0;
 
-    res.status(200).json(players[idNum].stats);
-
-  } catch (err) {
-    console.error("STATS ERROR:", err);
+    res.status(200).json({
+      games_played: Number(p.games_played ?? 0),
+      wins:         Number(p.wins         ?? 0),
+      losses:       Number(p.losses       ?? 0),
+      total_shots,
+      total_hits,
+      accuracy,
+    });
+  } catch {
     res.status(500).json({ error: "server error" });
   }
 });
-// LIST GAMES
-app.get("/api/games", (req, res) => {
-  res.status(200).json(Object.values(games).map(g => ({
-    game_id: g.game_id, status: g.status, players: g.players
-  })));
+
+// ─── games ──────────────────────────────────────────────────────────────────
+
+// GET /api/games
+app.get("/api/games", async (_req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id AS game_id, status, grid_size, max_players, creator_id FROM games ORDER BY id"
+    );
+    res.status(200).json(result.rows);
+  } catch {
+    res.status(500).json({ error: "server error" });
+  }
 });
 
-//create game
-
+// POST /api/games
 app.post("/api/games", async (req, res) => {
   try {
-    const body = req.body || {};
+    const { creator_id, grid_size, max_players } = req.body ?? {};
 
-    if (!body.creator_id || !body.grid_size || !body.max_players) {
+    if (creator_id == null || grid_size == null || max_players == null) {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    const creatorId = Number(body.creator_id);
-    const grid_size = Number(body.grid_size);
-    const max_players = Number(body.max_players);
+    const gs = Number(grid_size);
+    const mp = Number(max_players);
+    const cid = Number(creator_id);
 
-    if (!Number.isInteger(creatorId) || !Number.isInteger(grid_size) || !Number.isInteger(max_players)) {
+    if (!Number.isInteger(gs) || gs < 5 || gs > 15) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+    if (!Number.isInteger(mp) || mp < 2) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+    if (!Number.isFinite(cid) || !Number.isInteger(cid) || cid <= 0) {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    if (grid_size < 5 || grid_size > 15) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-
-    if (max_players < 2) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-
-    // 🔥 CHECK PLAYER EXISTS IN DB
     const playerCheck = await pool.query(
-      "SELECT * FROM players WHERE id = $1",
-      [creatorId]
+      "SELECT id FROM players WHERE id = $1",
+      [cid]
     );
-
     if (playerCheck.rows.length === 0) {
       return res.status(404).json({ error: "not_found" });
     }
 
-    // 🔥 LET POSTGRES GENERATE ID
-    const result = await pool.query(
-      "INSERT INTO games (grid_size, max_players, creator_id, status) VALUES ($1,$2,$3,$4) RETURNING id",
-      [grid_size, max_players, creatorId, "waiting_setup"]
+    const gameResult = await pool.query(
+      `INSERT INTO games (grid_size, max_players, creator_id, status)
+       VALUES ($1, $2, $3, 'waiting_setup') RETURNING id`,
+      [gs, mp, cid]
     );
+    const game_id = gameResult.rows[0].id;
 
-    const id = result.rows[0].id;
-
-    // 🔥 ALSO STORE IN MEMORY
-    games[id] = {
-      game_id: id,
-      grid_size,
-      max_players,
-      creator_id: creatorId,
-      status: "waiting_setup",
-      players: [creatorId],
-      ships: {},
-      placed: {},
-      moves: [],
-      hits: {},
-      firedCells: {},
-      current_turn_index: 0,
-      finished: false,
-      winner_id: null
-    };
-
-    return res.status(201).json({
-      game_id: id,
-      status: "waiting_setup"
-    });
-
-  } catch (err) {
-    console.error("GAME CREATE ERROR:", err);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-
-app.get("/api/games/:id", (req, res) => {
-  const idNum = safeId(req.params.id);
-  if (idNum === null) return res.status(404).json({ error: "not_found" });
-  const g = games[idNum];
-  if (!g) return res.status(404).json({ error: "not_found" });
-  const current_turn_player_id = g.status === "playing"
-    ? g.players[g.current_turn_index % g.players.length] : null;
-  res.status(200).json({
-    game_id: g.game_id, grid_size: g.grid_size, status: g.status,
-    players: g.players, current_turn_player_id, total_moves: g.moves.length
-  });
-});
-
-// JOIN GAME
-app.post("/api/games/:id/join", async (req, res) => {
-  try {
-    const gameId = safeId(req.params.id);
-    if (gameId === null) return res.status(404).json({ error: "not_found" });
-
-    const { player_id } = req.body;
-    if (!player_id) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-
-    // check DB game
-    const gameDB = await pool.query(
-      "SELECT * FROM games WHERE id = $1",
-      [gameId]
-    );
-    if (gameDB.rows.length === 0) {
-      return res.status(404).json({ error: "not_found" });
-    }
-
-    // check DB player
-    const playerDB = await pool.query(
-      "SELECT * FROM players WHERE id = $1",
-      [player_id]
-    );
-    if (playerDB.rows.length === 0) {
-      return res.status(404).json({ error: "not_found" });
-    }
-
-    // check already joined
-    const existing = await pool.query(
-      "SELECT * FROM game_players WHERE game_id = $1 AND player_id = $2",
-      [gameId, player_id]
-    );
-
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-
-    // check full
-    const count = await pool.query(
-      "SELECT COUNT(*) FROM game_players WHERE game_id = $1",
-      [gameId]
-    );
-
-    if (parseInt(count.rows[0].count) >= gameDB.rows[0].max_players) {
-      return res.status(400).json({ error: "bad_request" });
-    }
-
-    // insert into DB
     await pool.query(
       "INSERT INTO game_players (game_id, player_id) VALUES ($1, $2)",
-      [gameId, player_id]
+      [game_id, cid]
     );
 
-    // 🔥 IMPORTANT: ALSO UPDATE MEMORY
-    if (games[gameId]) {
-      games[gameId].players.push(player_id);
-    }
-
-    return res.status(200).json({ status: "joined" });
-
+    res.status(201).json({ game_id, status: "waiting_setup" });
   } catch (err) {
-    console.error("JOIN ERROR:", err);
-    return res.status(500).json({ error: "server error" });
+    console.error("POST /api/games error:", err);
+    res.status(500).json({ error: "server error" });
   }
 });
 
-// PLACE SHIPS
-app.post("/api/games/:id/place", async (req, res) => {
-  const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not_found" });
-  const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not_found" });
-
-  const body = req.body || {};
-  const playerId = getPlayerId(body);
-  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "bad_request" });
-
-  const playerCheck = await pool.query(
-    "SELECT * FROM players WHERE id = $1",
-    [playerId]
-  );
-  if (playerCheck.rows.length === 0) {
-    return res.status(404).json({ error: "not_found" });
-  }
-
-  if (!g.players.includes(playerId)) return res.status(403).json({ error: "forbidden" });
-  if (g.placed[playerId]) return res.status(409).json({ error: "conflict" });
-  if (body.ships === undefined || body.ships === null) return res.status(400).json({ error: "bad_request" });
-  if (!Array.isArray(body.ships)) return res.status(400).json({ error: "bad_request" });
-
-  const coords = normalizeShips(body.ships);
-  if (!coords) return res.status(400).json({ error: "bad_request" });
-
-  const occupied = new Set();
-  for (const { row, col } of coords) {
-    if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "bad_request" });
-    if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "bad_request" });
-
-    const key = `${row},${col}`;
-    if (occupied.has(key)) return res.status(400).json({ error: "bad_request" });
-    occupied.add(key);
-  }
-
-  g.ships[playerId] = coords;
-  g.placed[playerId] = true;
-  if (!(playerId in g.hits)) g.hits[playerId] = 0;
-  if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
-
-  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) {
-    g.status = "playing";
-  }
-
+// GET /api/games/:id
+app.get("/api/games/:id", async (req, res) => {
   try {
-    for (const c of coords) {
+    const id = safeId(req.params.id);
+    if (id === null) return res.status(404).json({ error: "not_found" });
+
+    const gameRes = await pool.query("SELECT * FROM games WHERE id = $1", [id]);
+    if (gameRes.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const game = gameRes.rows[0];
+
+    const playersRes = await pool.query(
+      "SELECT player_id FROM game_players WHERE game_id = $1",
+      [id]
+    );
+    const players = playersRes.rows.map(r => r.player_id);
+
+    const movesRes = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM moves WHERE game_id = $1",
+      [id]
+    );
+    const total_moves = Number(movesRes.rows[0].cnt);
+
+    // current turn: only meaningful when playing
+    let current_turn_player_id = null;
+    if (game.status === "playing" && players.length > 0) {
+      current_turn_player_id = game.current_turn_player_id ?? players[0];
+    }
+
+    res.status(200).json({
+      game_id:               game.id,
+      status:                game.status,
+      grid_size:             game.grid_size,
+      max_players:           game.max_players,
+      creator_id:            game.creator_id,
+      players,
+      current_turn_player_id,
+      total_moves,
+      winner_id:             game.winner_id ?? null,
+    });
+  } catch {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// ─── join game ──────────────────────────────────────────────────────────────
+
+// POST /api/games/:id/join
+app.post("/api/games/:id/join", async (req, res) => {
+  try {
+    const game_id = safeId(req.params.id);
+    if (game_id === null) return res.status(404).json({ error: "not_found" });
+
+    const player_id = req.body?.player_id != null
+      ? Number(req.body.player_id)
+      : null;
+
+    if (player_id == null || !Number.isInteger(player_id) || player_id <= 0) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // game exists?
+    const gameRes = await pool.query("SELECT * FROM games WHERE id = $1", [game_id]);
+    if (gameRes.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const game = gameRes.rows[0];
+
+    // player exists?
+    const playerRes = await pool.query("SELECT id FROM players WHERE id = $1", [player_id]);
+    if (playerRes.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+
+    // game must be in waiting_setup
+    if (game.status !== "waiting_setup") {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // already in game?
+    const alreadyIn = await pool.query(
+      "SELECT 1 FROM game_players WHERE game_id=$1 AND player_id=$2",
+      [game_id, player_id]
+    );
+    if (alreadyIn.rows.length > 0) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // full?
+    const countRes = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM game_players WHERE game_id=$1",
+      [game_id]
+    );
+    if (Number(countRes.rows[0].cnt) >= game.max_players) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    await pool.query(
+      "INSERT INTO game_players (game_id, player_id) VALUES ($1, $2)",
+      [game_id, player_id]
+    );
+
+    res.status(200).json({ status: "joined" });
+  } catch {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// ─── place ships ────────────────────────────────────────────────────────────
+
+// POST /api/games/:id/place
+app.post("/api/games/:id/place", async (req, res) => {
+  try {
+    const game_id = safeId(req.params.id);
+    if (game_id === null) return res.status(404).json({ error: "not_found" });
+
+    const { player_id, ships } = req.body ?? {};
+
+    if (player_id == null) return res.status(400).json({ error: "bad_request" });
+    const pid = Number(player_id);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    if (!ships || !Array.isArray(ships)) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // game exists?
+    const gameRes = await pool.query("SELECT * FROM games WHERE id = $1", [game_id]);
+    if (gameRes.rows.length === 0) return res.status(404).json({ error: "not_found" });
+    const game = gameRes.rows[0];
+
+    // player in game?
+    const inGame = await pool.query(
+      "SELECT 1 FROM game_players WHERE game_id=$1 AND player_id=$2",
+      [game_id, pid]
+    );
+    if (inGame.rows.length === 0) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    // game must be waiting_setup
+    if (game.status !== "waiting_setup") {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // validate ships: need exactly 3, each must be an object with row/col
+    if (ships.length < 3) return res.status(400).json({ error: "bad_request" });
+
+    for (const s of ships) {
+      if (typeof s !== "object" || Array.isArray(s) || s === null) {
+        return res.status(400).json({ error: "bad_request" });
+      }
+      if (s.row == null || s.col == null) {
+        return res.status(400).json({ error: "bad_request" });
+      }
+      const r = Number(s.row), c = Number(s.col);
+      if (!Number.isInteger(r) || !Number.isInteger(c)) {
+        return res.status(400).json({ error: "bad_request" });
+      }
+      if (r < 0 || r >= game.grid_size || c < 0 || c >= game.grid_size) {
+        return res.status(400).json({ error: "bad_request" });
+      }
+    }
+
+    // duplicate coordinates?
+    const coords = ships.map(s => `${s.row},${s.col}`);
+    if (new Set(coords).size !== coords.length) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // already placed?
+    const alreadyPlaced = await pool.query(
+      "SELECT 1 FROM ships WHERE game_id=$1 AND player_id=$2",
+      [game_id, pid]
+    );
+    if (alreadyPlaced.rows.length > 0) {
+      return res.status(409).json({ error: "conflict" });
+    }
+
+    // insert ships
+    for (const s of ships) {
       await pool.query(
         "INSERT INTO ships (game_id, player_id, row, col) VALUES ($1,$2,$3,$4)",
-        [gameId, playerId, c.row, c.col]
+        [game_id, pid, Number(s.row), Number(s.col)]
       );
     }
-  } catch (err) {
-    console.error("DB ships:", err.message);
-  }
 
-  res.status(200).json({ status: "placed" });
+    // check if all players have placed → transition to playing
+    const playerCountRes = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM game_players WHERE game_id=$1",
+      [game_id]
+    );
+    const placedCountRes = await pool.query(
+      "SELECT COUNT(DISTINCT player_id) AS cnt FROM ships WHERE game_id=$1",
+      [game_id]
+    );
+
+    const totalPlayers = Number(playerCountRes.rows[0].cnt);
+    const totalPlaced  = Number(placedCountRes.rows[0].cnt);
+
+    if (totalPlaced >= totalPlayers && totalPlayers >= 2) {
+      // pick first player (lowest id among players in game)
+      const firstPlayerRes = await pool.query(
+        "SELECT player_id FROM game_players WHERE game_id=$1 ORDER BY player_id ASC LIMIT 1",
+        [game_id]
+      );
+      const firstPlayer = firstPlayerRes.rows[0].player_id;
+
+      await pool.query(
+        "UPDATE games SET status='playing', current_turn_player_id=$1 WHERE id=$2",
+        [firstPlayer, game_id]
+      );
+    }
+
+    res.status(200).json({ status: "placed" });
+  } catch (err) {
+    console.error("POST /api/games/:id/place error:", err);
+    res.status(500).json({ error: "server error" });
+  }
 });
 
-// FIRE
+// ─── fire ───────────────────────────────────────────────────────────────────
+
+// POST /api/games/:id/fire
 app.post("/api/games/:id/fire", async (req, res) => {
-  const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not_found" });
-  const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not_found" });
-  if (g.finished) return res.status(400).json({ error: "bad_request" });
+  try {
+    const game_id = safeId(req.params.id);
+    if (game_id === null) return res.status(404).json({ error: "not_found" });
 
-  const body = req.body || {};
-  const playerId = getPlayerId(body);
-  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "bad_request" });
+    const { player_id, row, col } = req.body ?? {};
 
-  if (body.row === undefined) return res.status(400).json({ error: "bad_request" });
-  if (body.col === undefined) return res.status(400).json({ error: "bad_request" });
+    if (player_id == null || row == null || col == null) {
+      return res.status(400).json({ error: "bad_request" });
+    }
 
-  if (g.players.length < 2 || Object.keys(g.placed).length < g.players.length) {
-    return res.status(400).json({ error: "bad_request" });
-  }
+    const pid = Number(player_id);
+    const r   = Number(row);
+    const c   = Number(col);
 
-  const playerCheck = await pool.query(
-    "SELECT * FROM players WHERE id = $1",
-    [playerId]
-  );
-  if (playerCheck.rows.length === 0) {
-    return res.status(404).json({ error: "not_found" });
-  }
+    if (!Number.isInteger(pid) || pid <= 0 ||
+        !Number.isInteger(r)   ||
+        !Number.isInteger(c)) {
+      return res.status(400).json({ error: "bad_request" });
+    }
 
-  if (!g.players.includes(playerId)) return res.status(403).json({ error: "forbidden" });
+    // game exists?
+    const gameRes = await pool.query("SELECT * FROM games WHERE id = $1", [game_id]);
+    if (gameRes.rows.length === 0) return res.status(404).json({ error: "not_found" });
+    const game = gameRes.rows[0];
 
-  const currentPlayerId = g.players[g.current_turn_index % g.players.length];
-  if (playerId !== currentPlayerId) return res.status(403).json({ error: "forbidden" });
+    // game must be playing
+    if (game.status === "finished") {
+      return res.status(400).json({ error: "bad_request" });
+    }
+    if (game.status !== "playing") {
+      return res.status(400).json({ error: "bad_request" });
+    }
 
-  const row = Number(body.row);
-  const col = Number(body.col);
-  if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "bad_request" });
-  if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "bad_request" });
+    // bounds check
+    if (r < 0 || r >= game.grid_size || c < 0 || c >= game.grid_size) {
+      return res.status(400).json({ error: "bad_request" });
+    }
 
-  if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
-  const cellKey = `${row},${col}`;
-  if (g.firedCells[playerId].has(cellKey)) return res.status(409).json({ error: "conflict" });
-  g.firedCells[playerId].add(cellKey);
+    // correct turn?
+    if (game.current_turn_player_id !== pid) {
+      return res.status(403).json({ error: "forbidden" });
+    }
 
-  let hitResult = "miss";
-  for (const opponentId of g.players) {
-    if (opponentId === playerId) continue;
-    for (const coord of (g.ships[opponentId] || [])) {
-      if (coord.row === row && coord.col === col) {
-        hitResult = "hit";
-        g.hits[opponentId] = (g.hits[opponentId] || 0) + 1;
+    // duplicate fire?
+    const dupRes = await pool.query(
+      "SELECT 1 FROM moves WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
+      [game_id, pid, r, c]
+    );
+    if (dupRes.rows.length > 0) {
+      return res.status(409).json({ error: "conflict" });
+    }
+
+    // get all other players
+    const othersRes = await pool.query(
+      "SELECT player_id FROM game_players WHERE game_id=$1 AND player_id != $2",
+      [game_id, pid]
+    );
+    const others = othersRes.rows.map(rw => rw.player_id);
+
+    // check hit against any opponent's ships
+    let hit = false;
+    let hitPlayerId = null;
+    for (const opp of others) {
+      const shipRes = await pool.query(
+        "SELECT id FROM ships WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
+        [game_id, opp, r, c]
+      );
+      if (shipRes.rows.length > 0) {
+        hit = true;
+        hitPlayerId = opp;
+        // mark ship as hit
+        await pool.query(
+          "UPDATE ships SET hit=true WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
+          [game_id, opp, r, c]
+        );
         break;
       }
     }
-    if (hitResult === "hit") break;
-  }
 
-  if (!players[playerId]) {
-    players[playerId] = {
-      stats: {
-        games_played: 0,
-        wins: 0,
-        losses: 0,
-        total_shots: 0,
-        total_hits: 0,
-        accuracy: 0
+    // record move
+    await pool.query(
+      "INSERT INTO moves (game_id, player_id, row, col, hit) VALUES ($1,$2,$3,$4,$5)",
+      [game_id, pid, r, c, hit]
+    );
+
+    // update stats
+    await pool.query(
+      "UPDATE players SET total_shots = total_shots + 1, total_hits = total_hits + $1 WHERE id = $2",
+      [hit ? 1 : 0, pid]
+    );
+
+    // check if hitPlayerId has all ships sunk
+    let game_status = "playing";
+    let winner_id   = null;
+    let next_player_id = null;
+
+    if (hit && hitPlayerId !== null) {
+      const remainRes = await pool.query(
+        "SELECT COUNT(*) AS cnt FROM ships WHERE game_id=$1 AND player_id=$2 AND (hit IS NULL OR hit=false)",
+        [game_id, hitPlayerId]
+      );
+      if (Number(remainRes.rows[0].cnt) === 0) {
+        // that opponent is eliminated; check if game over (only 1 player left with ships)
+        const aliveRes = await pool.query(
+          `SELECT DISTINCT s.player_id FROM ships s
+           WHERE s.game_id=$1
+             AND EXISTS (
+               SELECT 1 FROM ships s2
+               WHERE s2.game_id=$1 AND s2.player_id=s.player_id
+                 AND (s2.hit IS NULL OR s2.hit=false)
+             )`,
+          [game_id]
+        );
+        if (aliveRes.rows.length <= 1) {
+          game_status = "finished";
+          winner_id = pid;
+          await pool.query(
+            "UPDATE games SET status='finished', winner_id=$1 WHERE id=$2",
+            [pid, game_id]
+          );
+          // update winner/loser stats
+          await pool.query(
+            "UPDATE players SET games_played = games_played + 1, wins = wins + 1 WHERE id = $1",
+            [pid]
+          );
+          for (const opp of others) {
+            await pool.query(
+              "UPDATE players SET games_played = games_played + 1, losses = losses + 1 WHERE id = $1",
+              [opp]
+            );
+          }
+        }
       }
-    };
+    }
+
+    // determine next turn (rotate through players)
+    if (game_status === "playing") {
+      const allPlayersRes = await pool.query(
+        "SELECT player_id FROM game_players WHERE game_id=$1 ORDER BY player_id ASC",
+        [game_id]
+      );
+      const allPlayers = allPlayersRes.rows.map(rw => rw.player_id);
+      const idx = allPlayers.indexOf(pid);
+      next_player_id = allPlayers[(idx + 1) % allPlayers.length];
+      await pool.query(
+        "UPDATE games SET current_turn_player_id=$1 WHERE id=$2",
+        [next_player_id, game_id]
+      );
+    } else {
+      next_player_id = null;
+    }
+
+    res.status(200).json({
+      result: hit ? "hit" : "miss",
+      next_player_id,
+      game_status,
+      winner_id,
+    });
+  } catch (err) {
+    console.error("POST /api/games/:id/fire error:", err);
+    res.status(500).json({ error: "server error" });
   }
+});
 
-  const shooter = players[playerId];
-  shooter.stats.total_shots += 1;
-  if (hitResult === "hit") shooter.stats.total_hits += 1;
-  shooter.stats.accuracy = shooter.stats.total_hits / shooter.stats.total_shots;
+// ─── move history ───────────────────────────────────────────────────────────
 
-  g.moves.push({
-    player_id: playerId,
-    row,
-    col,
-    result: hitResult,
-    timestamp: new Date().toISOString()
-  });
+// GET /api/games/:id/moves
+app.get("/api/games/:id/moves", async (req, res) => {
+  try {
+    const game_id = safeId(req.params.id);
+    if (game_id === null) return res.status(404).json({ error: "not_found" });
+
+    const gameRes = await pool.query("SELECT id FROM games WHERE id=$1", [game_id]);
+    if (gameRes.rows.length === 0) return res.status(404).json({ error: "not_found" });
+
+    const movesRes = await pool.query(
+      "SELECT player_id, row, col, hit FROM moves WHERE game_id=$1 ORDER BY id ASC",
+      [game_id]
+    );
+
+    res.status(200).json(movesRes.rows);
+  } catch {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// ─── test restart ───────────────────────────────────────────────────────────
+
+// POST /api/test/games/:id/restart
+app.post("/api/test/games/:id/restart", async (req, res) => {
+  if (!requireTestMode(req, res)) return;
 
   try {
+    const game_id = safeId(req.params.id);
+    if (game_id === null) return res.status(404).json({ error: "not_found" });
+
+    const gameRes = await pool.query("SELECT * FROM games WHERE id=$1", [game_id]);
+    if (gameRes.rows.length === 0) return res.status(404).json({ error: "not_found" });
+
+    const game = gameRes.rows[0];
+
+    // delete moves and ships for this game, reset status
+    await pool.query("DELETE FROM moves WHERE game_id=$1", [game_id]);
+    await pool.query("DELETE FROM ships WHERE game_id=$1", [game_id]);
+
+    // restore original players (just creator)
+    await pool.query("DELETE FROM game_players WHERE game_id=$1", [game_id]);
     await pool.query(
-      "INSERT INTO moves (game_id, player_id, row, col, result) VALUES ($1,$2,$3,$4,$5)",
-      [gameId, playerId, row, col, hitResult]
+      "INSERT INTO game_players (game_id, player_id) VALUES ($1,$2)",
+      [game_id, game.creator_id]
     );
-  } catch (err) {
-    console.error("DB moves:", err.message);
+
+    await pool.query(
+      "UPDATE games SET status='waiting_setup', current_turn_player_id=NULL, winner_id=NULL WHERE id=$1",
+      [game_id]
+    );
+
+    res.status(200).json({ status: "waiting_setup" });
+  } catch {
+    res.status(500).json({ error: "server error" });
   }
-
-  g.current_turn_index += 1;
-  const nextPId = g.players[g.current_turn_index % g.players.length];
-
-  let winnerId = null;
-  for (const opponentId of g.players) {
-    if (opponentId === playerId) continue;
-    const shipCount = (g.ships[opponentId] || []).length;
-    if ((g.hits[opponentId] || 0) >= shipCount && shipCount > 0) {
-      winnerId = playerId;
-      break;
-    }
-  }
-
-  if (winnerId !== null) {
-    g.finished = true;
-    g.status = "finished";
-    g.winner_id = winnerId;
-
-    for (const pid of g.players) {
-      if (!players[pid]) continue;
-      players[pid].stats.games_played += 1;
-      if (pid === winnerId) players[pid].stats.wins += 1;
-      else players[pid].stats.losses += 1;
-    }
-
-    return res.status(200).json({
-      result: hitResult,
-      next_player_id: null,
-      game_status: "finished",
-      winner_id: winnerId
-    });
-  }
-
-  res.status(200).json({
-    result: hitResult,
-    next_player_id: nextPId,
-    game_status: g.status
-  });
-});
-// MOVE HISTORY
-app.get("/api/games/:id/moves", (req, res) => {
-  const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not_found" });
-  const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not_found" });
-  res.status(200).json(g.moves);
 });
 
-// TEST: FORCE SHIPS
-app.post("/api/test/games/:id/ships", (req, res) => {
-  if (!requireTestMode(req, res)) return;
+// ─── root ────────────────────────────────────────────────────────────────────
 
-  const g = games[Number(req.params.id)];
-  if (!g) return res.status(404).json({ error: "not_found" });
-
-  const playerId = getPlayerId(req.body);
-  const coords = normalizeShips(req.body.ships);
-  if (!coords) return res.status(400).json({ error: "bad_request" });
-
-  g.ships[playerId] = coords;
-  g.placed[playerId] = true;
-
-  if (!(playerId in g.hits)) g.hits[playerId] = 0;
-  if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
-
-  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) {
-    g.status = "playing";
-  }
-
-  res.status(200).json({ message: "ok" });
-});
-
-// TEST: BOARD REVEAL
-app.get("/api/test/games/:id/board/:playerId", (req, res) => {
-  if (!requireTestMode(req, res)) return;
-  const g = games[Number(req.params.id)];
-  if (!g) return res.status(404).json({ error: "not_found" });
-  res.status(200).json({ ships: g.ships[Number(req.params.playerId)] || [] });
-});
-
-// TEST: RESTART
-// FIX: Reset players back to just the original creator so the autograder can re-join
-app.post("/api/test/games/:id/restart", (req, res) => {
-  if (!requireTestMode(req, res)) return;
-  const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not_found" });
-  const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not_found" });
-
-  // Keep only the original creator in the players list
-  const creator = g.creator_id;
-  g.players = creator !== undefined ? [creator] : [];
-  g.ships = {};
-  g.placed = {};
-  g.moves = [];
-  g.hits = {};
-  g.firedCells = {};
-  g.current_turn_index = 0;
-  g.finished = false;
-  g.winner_id = null;
-  g.status = "waiting_setup";
-
-  // Re-initialize hits/firedCells for remaining players
-  for (const pid of g.players) {
-    g.hits[pid] = 0;
-    g.firedCells[pid] = new Set();
-  }
-
-  res.status(200).json({ message: "restarted" });
-});
-
-app.get("/", (req, res) => res.send("Battleship API running"));
+app.get("/", (_req, res) => res.send("Battleship API running"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Running on port ${PORT}`));
