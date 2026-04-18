@@ -82,10 +82,9 @@ app.post("/api/reset", (req, res) => {
 });
 
 
-
 app.post("/api/players", async (req, res) => {
   try {
-    let username = req.body?.username;
+    const username = req.body?.username;
 
     if (!username || typeof username !== "string") {
       return res.status(400).json({ error: "bad_request" });
@@ -95,18 +94,37 @@ app.post("/api/players", async (req, res) => {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 FIX: force uniqueness so tests always pass
-    username = username + "_" + Date.now();
+    // 🔥 CHECK DUPLICATE
+    const existing = await pool.query(
+      "SELECT * FROM players WHERE username = $1",
+      [username]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: "conflict" });
+    }
 
     const result = await pool.query(
       "INSERT INTO players (username) VALUES ($1) RETURNING id",
       [username]
     );
 
+    players[result.rows[0].id] = {
+      username,
+      stats: {
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+        total_shots: 0,
+        total_hits: 0,
+        accuracy: 0
+      }
+    };
+
     return res.status(201).json({ player_id: result.rows[0].id });
 
   } catch (err) {
-    console.error("PLAYER ERROR:", err);
+    console.error(err);
     return res.status(500).json({ error: "server error" });
   }
 });
@@ -123,12 +141,40 @@ app.get("/api/players", async (req, res) => {
 
 
 // GET PLAYER STATS
-app.get("/api/players/:id/stats", (req, res) => {
-  const idNum = safeId(req.params.id);
-  if (idNum === null) return res.status(404).json({ error: "not found" });
-  const p = players[idNum];
-  if (!p) return res.status(404).json({ error: "not found" });
-  res.status(200).json(p.stats);
+app.get("/api/players/:id/stats", async (req, res) => {
+  try {
+    const idNum = safeId(req.params.id);
+    if (idNum === null) {
+      return res.status(404).json({ error: "not_found" });
+    }
+
+    // check DB
+    const player = await pool.query(
+      "SELECT * FROM players WHERE id = $1",
+      [idNum]
+    );
+
+    if (player.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+
+    // fallback to memory stats
+    const p = players[idNum] || {
+      stats: {
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+        total_shots: 0,
+        total_hits: 0,
+        accuracy: 0
+      }
+    };
+
+    res.status(200).json(p.stats);
+
+  } catch (err) {
+    res.status(500).json({ error: "server error" });
+  }
 });
 
 // LIST GAMES
@@ -141,60 +187,81 @@ app.get("/api/games", (req, res) => {
 //create game
 
 app.post("/api/games", async (req, res) => {
-  const body = req.body || {};
-  if (body.creator_id === undefined && body.player_id === undefined && body.playerId === undefined) {
-    return res.status(400).json({ error: "creator_id required" });
-  }
-  if (body.grid_size === undefined) return res.status(400).json({ error: "grid_size required" });
-  if (body.max_players === undefined) return res.status(400).json({ error: "max_players required" });
-  if (typeof body.grid_size === "string") return res.status(400).json({ error: "invalid grid_size" });
-
-  const creatorId = getPlayerId(body);
-  const grid_size = Number(body.grid_size);
-  const max_players = Number(body.max_players);
-
-  if (creatorId === null || isNaN(creatorId)) return res.status(400).json({ error: "creator_id required" });
-  if (isNaN(grid_size) || grid_size < 5 || grid_size > 15) return res.status(400).json({ error: "invalid grid_size" });
-  if (isNaN(max_players) || max_players < 2) return res.status(400).json({ error: "invalid max_players" });
-  if (!playerExists(creatorId)) return res.status(400).json({ error: "creator not found" });
-
-  const id = nextGameId++;
-  games[id] = {
-    game_id: id, grid_size, max_players,
-    creator_id: creatorId,
-    status: "waiting_setup",
-    players: [creatorId],
-    ships: {}, placed: {}, moves: [],
-    hits: { [creatorId]: 0 },
-    firedCells: { [creatorId]: new Set() },
-    current_turn_index: 0,
-    finished: false, winner_id: null
-  };
-
-  // ✅ DB SAVE
   try {
+    const body = req.body || {};
+
+    if (!body.creator_id) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+    if (!body.grid_size) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+    if (!body.max_players) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    const creatorId = Number(body.creator_id);
+    const grid_size = Number(body.grid_size);
+    const max_players = Number(body.max_players);
+
+    if (grid_size < 5 || grid_size > 15) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    if (max_players < 2) {
+      return res.status(400).json({ error: "bad_request" });
+    }
+
+    // 🔥 CHECK PLAYER IN DB (NOT MEMORY)
+    const playerCheck = await pool.query(
+      "SELECT * FROM players WHERE id = $1",
+      [creatorId]
+    );
+
+    if (playerCheck.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+
+    const id = nextGameId++;
+
+    games[id] = {
+      game_id: id,
+      grid_size,
+      max_players,
+      creator_id: creatorId,
+      status: "waiting_setup",
+      players: [creatorId],
+      ships: {},
+      placed: {},
+      moves: [],
+      hits: {},
+      firedCells: {},
+      current_turn_index: 0,
+      finished: false,
+      winner_id: null
+    };
+
     await pool.query(
       "INSERT INTO games (id, grid_size, max_players, creator_id, status) VALUES ($1,$2,$3,$4,$5)",
       [id, grid_size, max_players, creatorId, "waiting_setup"]
     );
 
-    await pool.query(
-      "INSERT INTO game_players (game_id, player_id) VALUES ($1,$2)",
-      [id, creatorId]
-    );
+    return res.status(201).json({
+      game_id: id,
+      status: "waiting_setup"
+    });
+
   } catch (err) {
-    console.error("DB games:", err.message);
+    console.error(err);
+    return res.status(500).json({ error: "server error" });
   }
-
-  res.status(201).json({ game_id: id, status: "waiting_setup" });
 });
-
 // GET GAME
 app.get("/api/games/:id", (req, res) => {
   const idNum = safeId(req.params.id);
-  if (idNum === null) return res.status(404).json({ error: "not found" });
+  if (idNum === null) return res.status(404).json({ error: "not_found" });
   const g = games[idNum];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
   const current_turn_player_id = g.status === "playing"
     ? g.players[g.current_turn_index % g.players.length] : null;
   res.status(200).json({
@@ -207,7 +274,7 @@ app.get("/api/games/:id", (req, res) => {
 app.post("/api/games/:id/join", async (req, res) => {
   try {
     const gameId = safeId(req.params.id);
-    if (gameId === null) return res.status(404).json({ error: "not found" });
+    if (gameId === null) return res.status(404).json({ error: "not_found" });
 
     const { player_id } = req.body;
     if (!player_id) {
@@ -220,7 +287,7 @@ app.post("/api/games/:id/join", async (req, res) => {
       [gameId]
     );
     if (gameDB.rows.length === 0) {
-      return res.status(404).json({ error: "not found" });
+      return res.status(404).json({ error: "not_found" });
     }
 
     // check DB player
@@ -229,7 +296,7 @@ app.post("/api/games/:id/join", async (req, res) => {
       [player_id]
     );
     if (playerDB.rows.length === 0) {
-      return res.status(404).json({ error: "not found" });
+      return res.status(404).json({ error: "not_found" });
     }
 
     // check already joined
@@ -274,28 +341,37 @@ app.post("/api/games/:id/join", async (req, res) => {
 // PLACE SHIPS
 app.post("/api/games/:id/place", async (req, res) => {
   const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not found" });
+  if (gameId === null) return res.status(404).json({ error: "not_found" });
   const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
 
   const body = req.body || {};
   const playerId = getPlayerId(body);
-  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
-  if (!playerExists(playerId)) return res.status(400).json({ error: "player not found" });
-  if (!g.players.includes(playerId)) return res.status(403).json({ error: "not in game" });
-  if (g.placed[playerId]) return res.status(409).json({ error: "already placed" });
-  if (body.ships === undefined || body.ships === null) return res.status(400).json({ error: "ships required" });
-  if (!Array.isArray(body.ships)) return res.status(400).json({ error: "ships must be array" });
+  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "bad_request" });
+
+  const playerCheck = await pool.query(
+    "SELECT * FROM players WHERE id = $1",
+    [playerId]
+  );
+  if (playerCheck.rows.length === 0) {
+    return res.status(404).json({ error: "not_found" });
+  }
+
+  if (!g.players.includes(playerId)) return res.status(403).json({ error: "forbidden" });
+  if (g.placed[playerId]) return res.status(409).json({ error: "conflict" });
+  if (body.ships === undefined || body.ships === null) return res.status(400).json({ error: "bad_request" });
+  if (!Array.isArray(body.ships)) return res.status(400).json({ error: "bad_request" });
 
   const coords = normalizeShips(body.ships);
-  if (!coords) return res.status(400).json({ error: "must place exactly 3 ships as objects" });
+  if (!coords) return res.status(400).json({ error: "bad_request" });
 
   const occupied = new Set();
   for (const { row, col } of coords) {
-    if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "invalid coordinate" });
-    if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "out of bounds" });
+    if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "bad_request" });
+    if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "bad_request" });
+
     const key = `${row},${col}`;
-    if (occupied.has(key)) return res.status(400).json({ error: "duplicate coordinates" });
+    if (occupied.has(key)) return res.status(400).json({ error: "bad_request" });
     occupied.add(key);
   }
 
@@ -303,9 +379,11 @@ app.post("/api/games/:id/place", async (req, res) => {
   g.placed[playerId] = true;
   if (!(playerId in g.hits)) g.hits[playerId] = 0;
   if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
-  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) g.status = "playing";
 
-  // ✅ DB SAVE
+  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) {
+    g.status = "playing";
+  }
+
   try {
     for (const c of coords) {
       await pool.query(
@@ -323,35 +401,43 @@ app.post("/api/games/:id/place", async (req, res) => {
 // FIRE
 app.post("/api/games/:id/fire", async (req, res) => {
   const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not found" });
+  if (gameId === null) return res.status(404).json({ error: "not_found" });
   const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not found" });
-  if (g.finished) return res.status(400).json({ error: "game already finished" });
+  if (!g) return res.status(404).json({ error: "not_found" });
+  if (g.finished) return res.status(400).json({ error: "bad_request" });
 
   const body = req.body || {};
   const playerId = getPlayerId(body);
-  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "player_id required" });
+  if (playerId === null || isNaN(playerId)) return res.status(400).json({ error: "bad_request" });
 
-  if (body.row === undefined) return res.status(400).json({ error: "row required" });
-  if (body.col === undefined) return res.status(400).json({ error: "col required" });
+  if (body.row === undefined) return res.status(400).json({ error: "bad_request" });
+  if (body.col === undefined) return res.status(400).json({ error: "bad_request" });
 
   if (g.players.length < 2 || Object.keys(g.placed).length < g.players.length) {
-    return res.status(400).json({ error: "game not ready" });
+    return res.status(400).json({ error: "bad_request" });
   }
-  if (!playerExists(playerId)) return res.status(400).json({ error: "player not found" });
-  if (!g.players.includes(playerId)) return res.status(403).json({ error: "not in game" });
+
+  const playerCheck = await pool.query(
+    "SELECT * FROM players WHERE id = $1",
+    [playerId]
+  );
+  if (playerCheck.rows.length === 0) {
+    return res.status(404).json({ error: "not_found" });
+  }
+
+  if (!g.players.includes(playerId)) return res.status(403).json({ error: "forbidden" });
 
   const currentPlayerId = g.players[g.current_turn_index % g.players.length];
-  if (playerId !== currentPlayerId) return res.status(403).json({ error: "not your turn" });
+  if (playerId !== currentPlayerId) return res.status(403).json({ error: "forbidden" });
 
   const row = Number(body.row);
   const col = Number(body.col);
-  if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "invalid coordinate" });
-  if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "out of bounds" });
+  if (Number.isNaN(row) || Number.isNaN(col)) return res.status(400).json({ error: "bad_request" });
+  if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) return res.status(400).json({ error: "bad_request" });
 
   if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
   const cellKey = `${row},${col}`;
-  if (g.firedCells[playerId].has(cellKey)) return res.status(409).json({ error: "already targeted" });
+  if (g.firedCells[playerId].has(cellKey)) return res.status(409).json({ error: "conflict" });
   g.firedCells[playerId].add(cellKey);
 
   let hitResult = "miss";
@@ -367,14 +453,32 @@ app.post("/api/games/:id/fire", async (req, res) => {
     if (hitResult === "hit") break;
   }
 
+  if (!players[playerId]) {
+    players[playerId] = {
+      stats: {
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+        total_shots: 0,
+        total_hits: 0,
+        accuracy: 0
+      }
+    };
+  }
+
   const shooter = players[playerId];
   shooter.stats.total_shots += 1;
   if (hitResult === "hit") shooter.stats.total_hits += 1;
   shooter.stats.accuracy = shooter.stats.total_hits / shooter.stats.total_shots;
 
-  g.moves.push({ player_id: playerId, row, col, result: hitResult, timestamp: new Date().toISOString() });
+  g.moves.push({
+    player_id: playerId,
+    row,
+    col,
+    result: hitResult,
+    timestamp: new Date().toISOString()
+  });
 
-  // ✅ DB SAVE
   try {
     await pool.query(
       "INSERT INTO moves (game_id, player_id, row, col, result) VALUES ($1,$2,$3,$4,$5)",
@@ -391,44 +495,68 @@ app.post("/api/games/:id/fire", async (req, res) => {
   for (const opponentId of g.players) {
     if (opponentId === playerId) continue;
     const shipCount = (g.ships[opponentId] || []).length;
-    if ((g.hits[opponentId] || 0) >= shipCount && shipCount > 0) { winnerId = playerId; break; }
+    if ((g.hits[opponentId] || 0) >= shipCount && shipCount > 0) {
+      winnerId = playerId;
+      break;
+    }
   }
 
   if (winnerId !== null) {
-    g.finished = true; g.status = "finished"; g.winner_id = winnerId;
+    g.finished = true;
+    g.status = "finished";
+    g.winner_id = winnerId;
+
     for (const pid of g.players) {
       if (!players[pid]) continue;
       players[pid].stats.games_played += 1;
       if (pid === winnerId) players[pid].stats.wins += 1;
       else players[pid].stats.losses += 1;
     }
-    return res.status(200).json({ result: hitResult, next_player_id: null, game_status: "finished", winner_id: winnerId });
+
+    return res.status(200).json({
+      result: hitResult,
+      next_player_id: null,
+      game_status: "finished",
+      winner_id: winnerId
+    });
   }
 
-  res.status(200).json({ result: hitResult, next_player_id: nextPId, game_status: g.status });
+  res.status(200).json({
+    result: hitResult,
+    next_player_id: nextPId,
+    game_status: g.status
+  });
 });
 // MOVE HISTORY
 app.get("/api/games/:id/moves", (req, res) => {
   const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not found" });
+  if (gameId === null) return res.status(404).json({ error: "not_found" });
   const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
   res.status(200).json(g.moves);
 });
 
 // TEST: FORCE SHIPS
 app.post("/api/test/games/:id/ships", (req, res) => {
   if (!requireTestMode(req, res)) return;
+
   const g = games[Number(req.params.id)];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
+
   const playerId = getPlayerId(req.body);
   const coords = normalizeShips(req.body.ships);
-  if (!coords) return res.status(400).json({ error: "invalid ships format" });
+  if (!coords) return res.status(400).json({ error: "bad_request" });
+
   g.ships[playerId] = coords;
   g.placed[playerId] = true;
+
   if (!(playerId in g.hits)) g.hits[playerId] = 0;
   if (!g.firedCells[playerId]) g.firedCells[playerId] = new Set();
-  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) g.status = "playing";
+
+  if (g.players.length >= 2 && Object.keys(g.placed).length >= g.players.length) {
+    g.status = "playing";
+  }
+
   res.status(200).json({ message: "ok" });
 });
 
@@ -436,7 +564,7 @@ app.post("/api/test/games/:id/ships", (req, res) => {
 app.get("/api/test/games/:id/board/:playerId", (req, res) => {
   if (!requireTestMode(req, res)) return;
   const g = games[Number(req.params.id)];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
   res.status(200).json({ ships: g.ships[Number(req.params.playerId)] || [] });
 });
 
@@ -445,9 +573,9 @@ app.get("/api/test/games/:id/board/:playerId", (req, res) => {
 app.post("/api/test/games/:id/restart", (req, res) => {
   if (!requireTestMode(req, res)) return;
   const gameId = safeId(req.params.id);
-  if (gameId === null) return res.status(404).json({ error: "not found" });
+  if (gameId === null) return res.status(404).json({ error: "not_found" });
   const g = games[gameId];
-  if (!g) return res.status(404).json({ error: "not found" });
+  if (!g) return res.status(404).json({ error: "not_found" });
 
   // Keep only the original creator in the players list
   const creator = g.creator_id;
