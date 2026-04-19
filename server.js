@@ -1,11 +1,18 @@
 import express from "express";
 import cors from "cors";
 import { pool } from "./db.js";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
+// Fix for __dirname in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 app.use(cors());
 app.use(express.json());
+// Serve frontend files (index.html, CSS, JS)
+app.use(express.static(__dirname));
 
 const TEST_PASSWORD = "clemson-test-2026";
 
@@ -575,8 +582,9 @@ app.post("/api/test/games/:id/restart", async (req, res) => {
 });
 
 // ─── root ─────────────────────────────────────────────────────────────────────
-
-app.get("/", (_req, res) => res.send("Battleship API running"));
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Running on port ${PORT}`));
