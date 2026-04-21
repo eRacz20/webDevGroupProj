@@ -461,6 +461,10 @@
     <!-- GAME CONTROLS -->
     <div class="panel">
       <div class="panel-title">FLEET COMMAND</div>
+
+      <!-- 🔥 ADD THIS INPUT RIGHT HERE -->
+      <input type="number" id="gridSizeInput" min="5" max="15" value="10" placeholder="Grid size (5-15)">
+
       <button class="btn success" onclick="createGame()">CREATE GAME</button>
       <button class="btn" onclick="loadGames()">REFRESH GAMES LIST</button>
       <hr class="divider">
@@ -614,33 +618,54 @@ async function register() {
 // ── CREATE GAME ───────────────────────────────────────────────────────────────
 
 async function createGame() {
-  if (!playerId) { setStatus('Register first', 'error'); return; }
+  if (!playerId) {
+    setStatus('Register first', 'error');
+    return;
+  }
 
-  setStatus('Creating game...');
+  let size = Number(document.getElementById('gridSizeInput').value);
+
+  if (isNaN(size) || size < 5 || size > 15) {
+    setStatus('Grid size must be between 5 and 15', 'error');
+    return;
+  }
+
+  setStatus(`Creating ${size}x${size} game...`);
+
   const res = await fetch(API + '/api/games', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ creator_id: playerId, grid_size: 10, max_players: 2 })
+    body: JSON.stringify({
+      creator_id: playerId,
+      grid_size: size,
+      max_players: 2
+    })
   });
+
   const data = await res.json();
 
   if (res.status === 201) {
     gameId = data.game_id;
-    gridSize = 10;
+    gridSize = size;
     ships = [];
     shipsPlaced = false;
     firedCells = new Set();
+
     updateInfoPanel();
-    setStatus(`Game ${gameId} created — place your ships`, 'success');
-    log(`Game ${gameId} created`, 'system');
+    setStatus(`Game ${gameId} (${size}x${size}) created — place ships`, 'success');
+    log(`Game ${gameId} created (${size}x${size})`, 'system');
+
     document.getElementById('phaseLabel').textContent = 'PLACE SHIPS';
     document.getElementById('phaseHint').textContent = 'Click 3 cells to place ships, then confirm';
+
     drawGrid();
     startPolling();
+
   } else {
     setStatus('Error: ' + (data.error || res.status), 'error');
   }
 }
+
 
 // ── LOAD GAMES ────────────────────────────────────────────────────────────────
 
