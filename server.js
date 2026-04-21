@@ -404,7 +404,7 @@ app.post("/api/games/:id/fire", async (req, res) => {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 get game
+    // get game
     const gameRes = await pool.query("SELECT * FROM games WHERE id=$1", [game_id]);
     if (gameRes.rows.length === 0) {
       return res.status(404).json({ error: "not_found" });
@@ -415,7 +415,7 @@ app.post("/api/games/:id/fire", async (req, res) => {
       return res.status(400).json({ error: "bad_request" });
     }
 
-    // 🔥 check player in game
+    // check player in game
     const inGame = await pool.query(
       "SELECT 1 FROM game_players WHERE game_id=$1 AND player_id=$2",
       [game_id, pid]
@@ -424,12 +424,12 @@ app.post("/api/games/:id/fire", async (req, res) => {
       return res.status(403).json({ error: "forbidden" });
     }
 
-    // 🔥 check turn
+    // check turn
     if (game.current_turn_player_id !== pid) {
       return res.status(403).json({ error: "forbidden" });
     }
 
-    // 🔥 prevent duplicate shots
+    // prevent duplicate shots
     const alreadyShot = await pool.query(
       "SELECT 1 FROM moves WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
       [game_id, pid, r, c]
@@ -438,7 +438,7 @@ app.post("/api/games/:id/fire", async (req, res) => {
       return res.status(409).json({ error: "conflict" });
     }
 
-    // 🔥 check hit
+    // check hit
     const hitRes = await pool.query(
       "SELECT * FROM ships WHERE game_id=$1 AND row=$2 AND col=$3 AND hit=false",
       [game_id, r, c]
@@ -451,7 +451,6 @@ app.post("/api/games/:id/fire", async (req, res) => {
       hit = true;
       hitPlayerId = hitRes.rows[0].player_id;
 
-      // mark ship as hit
       await pool.query(
         "UPDATE ships SET hit=true WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
         [game_id, hitPlayerId, r, c]
@@ -464,7 +463,20 @@ app.post("/api/games/:id/fire", async (req, res) => {
       [game_id, pid, r, c, hit]
     );
 
-    // 🔥 check win (3 ships sunk)
+    // 🔥 FIX: UPDATE PLAYER STATS
+    await pool.query(
+      "UPDATE players SET total_shots = total_shots + 1 WHERE id = $1",
+      [pid]
+    );
+
+    if (hit) {
+      await pool.query(
+        "UPDATE players SET total_hits = total_hits + 1 WHERE id = $1",
+        [pid]
+      );
+    }
+
+    // check win (3 ships sunk)
     let winner_id = null;
     let game_status = game.status;
 
@@ -483,7 +495,6 @@ app.post("/api/games/:id/fire", async (req, res) => {
           [pid, game_id]
         );
 
-        // stats
         await pool.query(
           "UPDATE players SET games_played = games_played + 1, wins = wins + 1 WHERE id=$1",
           [pid]
@@ -496,7 +507,7 @@ app.post("/api/games/:id/fire", async (req, res) => {
       }
     }
 
-    // 🔥 next turn
+    // next turn
     let next_player_id = null;
 
     if (!winner_id) {
