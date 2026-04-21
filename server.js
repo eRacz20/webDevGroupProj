@@ -386,143 +386,152 @@ app.post("/api/games/:id/place", async (req, res) => {
 // ─── fire ─────────────────────────────────────────────────────────────────────
 
 app.post("/api/games/:id/fire", async (req, res) => {
-  try {
-    const game_id = safeId(req.params.id);
-    if (game_id === null) return res.status(404).json({ error: "not_found" });
+  const game_id = safeId(req.params.id);
+  if (game_id === null) return res.status(404).json({ error: "not_found" });
 
-    const { player_id, row, col } = req.body ?? {};
+  const g = games[game_id];
+  if (!g) return res.status(404).json({ error: "not_found" });
 
-    if (player_id == null || row == null || col == null) {
-      return res.status(400).json({ error: "bad_request" });
-    }
+  if (g.finished) {
+    return res.status(400).json({ error: "bad_request" });
+  }
 
-    const pid = Number(player_id);
-    const r   = Number(row);
-    const c   = Number(col);
+  const body = req.body || {};
+  const pid = getPlayerId(body);
+  if (pid === null || isNaN(pid)) {
+    return res.status(400).json({ error: "bad_request" });
+  }
 
-    if (!Number.isFinite(pid) || !Number.isInteger(pid) || pid <= 0 ||
-        !Number.isFinite(r)   || !Number.isInteger(r) ||
-        !Number.isFinite(c)   || !Number.isInteger(c)) {
-      return res.status(400).json({ error: "bad_request" });
-    }
+  if (body.row === undefined || body.col === undefined) {
+    return res.status(400).json({ error: "bad_request" });
+  }
 
-    const gameRes = await pool.query("SELECT * FROM games WHERE id = $1", [game_id]);
-    if (gameRes.rows.length === 0) return res.status(404).json({ error: "not_found" });
-    const game = gameRes.rows[0];
+  const row = Number(body.row);
+  const col = Number(body.col);
 
-    if (game.status !== "playing") {
-      return res.status(400).json({ error: "bad_request" });
-    }
+  if (Number.isNaN(row) || Number.isNaN(col)) {
+    return res.status(400).json({ error: "bad_request" });
+  }
 
-    if (r < 0 || r >= game.grid_size || c < 0 || c >= game.grid_size) {
-      return res.status(400).json({ error: "bad_request" });
-    }
+  if (row < 0 || col < 0 || row >= g.grid_size || col >= g.grid_size) {
+    return res.status(400).json({ error: "bad_request" });
+  }
 
-    if (Number(game.current_turn_player_id) !== pid) {
-      return res.status(403).json({ error: "forbidden" });
-    }
+  if (!g.players.includes(pid)) {
+    return res.status(403).json({ error: "forbidden" });
+  }
 
-    const dupRes = await pool.query(
-      "SELECT 1 FROM moves WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
-      [game_id, pid, r, c]
-    );
-    if (dupRes.rows.length > 0) {
-      return res.status(409).json({ error: "conflict" });
-    }
+  const currentPlayer = g.players[g.current_turn_index % g.players.length];
+  if (pid !== currentPlayer) {
+    return res.status(403).json({ error: "forbidden" });
+  }
 
-    const othersRes = await pool.query(
-      "SELECT player_id FROM game_players WHERE game_id=$1 AND player_id != $2",
-      [game_id, pid]
-    );
-    const others = othersRes.rows.map(rw => Number(rw.player_id));
+  if (!g.firedCells[pid]) g.firedCells[pid] = new Set();
+  const key = `${row},${col}`;
 
-    let hit = false;
-    let hitPlayerId = null;
-    for (const opp of others) {
-      const shipRes = await pool.query(
-        "SELECT id FROM ships WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
-        [game_id, opp, r, c]
-      );
-      if (shipRes.rows.length > 0) {
+  if (g.firedCells[pid].has(key)) {
+    return res.status(409).json({ error: "conflict" });
+  }
+
+  g.firedCells[pid].add(key);
+
+  let hit = false;
+  let hitPlayerId = null;
+
+  for (const other of g.players) {
+    if (other === pid) continue;
+
+    for (const s of g.ships[other] || []) {
+      if (s.row === row && s.col === col && !s.hit) {
+        s.hit = true;
         hit = true;
-        hitPlayerId = opp;
-        await pool.query(
-          "UPDATE ships SET hit=true WHERE game_id=$1 AND player_id=$2 AND row=$3 AND col=$4",
-          [game_id, opp, r, c]
-        );
+        hitPlayerId = other;
         break;
       }
     }
-
-    await pool.query(
-      "INSERT INTO moves (game_id, player_id, row, col, hit) VALUES ($1,$2,$3,$4,$5)",
-      [game_id, pid, r, c, hit]
-    );
-
-    await pool.query(
-      "UPDATE players SET total_shots = total_shots + 1, total_hits = total_hits + $1 WHERE id = $2",
-      [hit ? 1 : 0, pid]
-    );
-
-    let game_status = "playing";
-    let winner_id   = null;
-    let next_player_id = null;
-
-    if (hit && hitPlayerId !== null) {
-      const remainRes = await pool.query(
-        "SELECT COUNT(*) AS cnt FROM ships WHERE game_id=$1 AND player_id=$2 AND hit=false",
-        [game_id, hitPlayerId]
-      );
-      if (Number(remainRes.rows[0].cnt) === 0) {
-        const aliveRes = await pool.query(
-          "SELECT DISTINCT player_id FROM ships WHERE game_id=$1 AND hit=false",
-          [game_id]
-        );
-        if (aliveRes.rows.length === 0) {
-          game_status = "finished";
-          winner_id = pid;
-          await pool.query(
-            "UPDATE games SET status='finished', winner_id=$1 WHERE id=$2",
-            [pid, game_id]
-          );
-          await pool.query(
-            "UPDATE players SET games_played = games_played + 1, wins = wins + 1 WHERE id = $1",
-            [pid]
-          );
-          for (const opp of others) {
-            await pool.query(
-              "UPDATE players SET games_played = games_played + 1, losses = losses + 1 WHERE id = $1",
-              [opp]
-            );
-          }
-        }
-      }
-    }
-
-    if (game_status === "playing") {
-      const allPlayersRes = await pool.query(
-        "SELECT player_id FROM game_players WHERE game_id=$1 ORDER BY player_id ASC",
-        [game_id]
-      );
-      const allPlayers = allPlayersRes.rows.map(rw => Number(rw.player_id));
-      const idx = allPlayers.indexOf(pid);
-      next_player_id = allPlayers[(idx + 1) % allPlayers.length];
-      await pool.query(
-        "UPDATE games SET current_turn_player_id=$1 WHERE id=$2",
-        [next_player_id, game_id]
-      );
-    }
-
-    res.status(200).json({
-      result: hit ? "hit" : "miss",
-      next_player_id,
-      game_status,
-      winner_id,
-    });
-  } catch (err) {
-    console.error("POST /api/games/:id/fire error:", err);
-    res.status(500).json({ error: "server error" });
+    if (hit) break;
   }
+
+  // ensure stats object exists
+  if (!players[pid]) {
+    players[pid] = {
+      stats: {
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+        total_shots: 0,
+        total_hits: 0,
+        accuracy: 0
+      }
+    };
+  }
+
+  players[pid].stats.total_shots++;
+  if (hit) players[pid].stats.total_hits++;
+
+  players[pid].stats.accuracy =
+    players[pid].stats.total_hits / players[pid].stats.total_shots;
+
+  let game_status = g.status;
+  let winner_id = null;
+
+  if (hit && hitPlayerId !== null) {
+    const remainRes = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM ships WHERE game_id=$1 AND player_id=$2 AND hit=false",
+      [game_id, hitPlayerId]
+    );
+
+    // 🔥 FIX: WIN WHEN THIS PLAYER HAS 0 SHIPS LEFT
+    if (Number(remainRes.rows[0].cnt) === 0) {
+      game_status = "finished";
+      winner_id = pid;
+
+      await pool.query(
+        "UPDATE games SET status='finished', winner_id=$1 WHERE id=$2",
+        [pid, game_id]
+      );
+
+      // winner
+      await pool.query(
+        "UPDATE players SET games_played = games_played + 1, wins = wins + 1 WHERE id = $1",
+        [pid]
+      );
+
+      // losers
+      const others = g.players.filter(p => p !== pid);
+      for (const opp of others) {
+        await pool.query(
+          "UPDATE players SET games_played = games_played + 1, losses = losses + 1 WHERE id = $1",
+          [opp]
+        );
+      }
+
+      g.finished = true;
+      g.status = "finished";
+      g.winner_id = pid;
+    }
+  }
+
+  // save move
+  await pool.query(
+    "INSERT INTO moves (game_id, player_id, row, col, result) VALUES ($1,$2,$3,$4,$5)",
+    [game_id, pid, row, col, hit ? "hit" : "miss"]
+  );
+
+  if (!g.finished) {
+    g.current_turn_index++;
+  }
+
+  const next_player_id = g.finished
+    ? null
+    : g.players[g.current_turn_index % g.players.length];
+
+  res.status(200).json({
+    result: hit ? "hit" : "miss",
+    next_player_id,
+    game_status,
+    winner_id
+  });
 });
 
 // ─── move history ─────────────────────────────────────────────────────────────
