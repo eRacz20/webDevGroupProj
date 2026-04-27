@@ -21,6 +21,22 @@
     --glow: 0 0 12px rgba(0,212,255,0.5);
   }
 
+  /* LIGHT MODE OVERRIDE */
+body.light {
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --border: #d0d7e2;
+  --accent: #0077ff;
+  --accent2: #ff4d6d;
+  --hit: #ff4d6d;
+  --miss: #cfe3ff;
+  --ship: #0077ff;
+  --text: #1a1a1a;
+  --dim: #6b7a90;
+  --green: #00b894;
+  --glow: 0 0 10px rgba(0,119,255,0.3);
+}
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
@@ -428,6 +444,31 @@
     font-size: 1.8rem;
     text-shadow: 0 0 20px var(--green);
   }
+
+
+  /* LIGHT MODE FIXES */
+body.light {
+  background-image: none;
+}
+
+body.light .cell {
+  background: #eaf2ff;
+  border: 1px solid #c5d4ea;
+}
+
+body.light .cell:hover {
+  background: #dbe9ff;
+}
+
+body.light input,
+body.light select {
+  background: #ffffff;
+  color: #000;
+}
+
+body.light #statusBar {
+  background: #f1f6ff;
+}
   @keyframes fadeIn { from { opacity:0; transform:scale(0.95); } to { opacity:1; transform:scale(1); } }
 </style>
 </head>
@@ -436,6 +477,15 @@
 <header>
   <h1>◈ BATTLESHIP ◈</h1>
   <p>NAVAL WARFARE COMMAND SYSTEM v2.0</p>
+  <button onclick="toggleTheme()" style="
+  position:absolute;
+  right:20px;
+  top:20px;
+  padding:6px 10px;
+  font-size:0.7rem;
+">
+  TOGGLE MODE
+</button>
 </header>
 
 <div class="app">
@@ -968,7 +1018,27 @@ async function loadStats() {
     document.getElementById('sHits').textContent = d.total_hits ?? 0;
     document.getElementById('sAccuracy').textContent = ((d.accuracy ?? 0) * 100).toFixed(0) + '%';
   } catch(e) {}
+
+  
+
+}
+
+/* ✅ PUT IT HERE (GLOBAL SCOPE) */
+function toggleTheme() {
+  document.body.classList.toggle("light");
+
+  if (document.body.classList.contains("light")) {
+    localStorage.setItem("theme", "light");
+  } else {
+    localStorage.setItem("theme", "dark");
+  }
+}
+
+// load saved theme
+if (localStorage.getItem("theme") === "light") {
+  document.body.classList.add("light");
 }
 </script>
+
 </body>
 </html>
